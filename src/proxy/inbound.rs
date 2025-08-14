@@ -105,7 +105,12 @@ impl Inbound {
                 let drain = drain.clone();
                 let force_shutdown = force_shutdown.clone();
                 let pi = self.pi.clone();
-                let dst = to_canonical(raw_socket.local_addr().expect("local_addr available"));
+                let dst;
+                if pi.cfg.use_original_dst_port {
+                    dst = socket::orig_dst_addr_or_default(&raw_socket);
+                } else {
+                    dst = to_canonical(raw_socket.local_addr().expect("local_addr available"));
+                }
                 let network = pi.cfg.network.clone();
                 let acceptor = crate::tls::InboundAcceptor::new(acceptor.clone());
                 let serve_client = async move {

@@ -598,14 +598,19 @@ impl OutboundConnection {
             }
             // Workload doesn't have a waypoint; send directly
         }
-
+        
         let selected_workload_ip = us
             .selected_workload_ip
             .ok_or(Error::NoValidDestination(Box::new((*us.workload).clone())))?;
 
         // only change the port if we're sending HBONE
         let actual_destination = match us.workload.protocol {
-            InboundProtocol::HBONE => SocketAddr::from((selected_workload_ip, self.hbone_port)),
+            InboundProtocol::HBONE if self.pi.cfg.use_original_dst_port => {
+                SocketAddr::from((selected_workload_ip, target.port()))
+            }
+            InboundProtocol::HBONE => {
+                SocketAddr::from((selected_workload_ip, self.hbone_port))
+            }
             InboundProtocol::TCP => us
                 .workload_socket_addr()
                 .ok_or(Error::NoValidDestination(Box::new((*us.workload).clone())))?,
@@ -617,7 +622,7 @@ impl OutboundConnection {
             )),
             InboundProtocol::TCP => None,
         };
-
+        
         // For case no waypoint for both side and direct to remote node proxy
         let (upstream_sans, final_sans) = (us.workload_and_services_san(), vec![]);
         debug!("built request to workload");

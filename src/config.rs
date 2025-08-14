@@ -35,6 +35,7 @@ use crate::{identity, state};
 use {crate::test_helpers::MpscAckReceiver, crate::xds::LocalConfig, tokio::sync::Mutex};
 
 const ENABLE_PROXY: &str = "ENABLE_PROXY";
+const USE_ORIGINAL_DST_PORT: &str = "USE_ORIGINAL_DST_PORT";
 const KUBERNETES_SERVICE_HOST: &str = "KUBERNETES_SERVICE_HOST";
 const NETWORK: &str = "NETWORK";
 const NODE_NAME: &str = "NODE_NAME";
@@ -311,6 +312,7 @@ pub struct Config {
     pub ztunnel_workload: Option<state::WorkloadInfo>,
 
     pub ipv6_enabled: bool,
+    pub use_original_dst_port: bool,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -704,6 +706,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     };
 
     validate_config(Config {
+        use_original_dst_port: parse_default(USE_ORIGINAL_DST_PORT, false)?,
         proxy: parse_default(ENABLE_PROXY, true)?,
         // Enable by default; running the server is not an issue, clients still need to opt-in to sending their
         // DNS requests to Ztunnel.
