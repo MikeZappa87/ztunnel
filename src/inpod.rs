@@ -68,6 +68,18 @@ impl WorkloadUid {
     }
 }
 
+#[derive(Eq, PartialEq, Hash, Debug, Clone, PartialOrd, Ord, serde::Serialize,serde::Deserialize, Copy)]
+pub struct WorkloadPid(i32);
+
+impl WorkloadPid {
+    pub fn new(pid: i32) -> Self {
+        Self(pid)
+    }
+    pub fn into_i32(self) -> i32 {
+        self.0
+    }
+}
+
 #[derive(Debug)]
 pub struct WorkloadData {
     netns: std::os::fd::OwnedFd,

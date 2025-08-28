@@ -21,6 +21,7 @@ message WorkloadInfo {
   string name = 1;
   string namespace = 2;
   string service_account = 3;
+  //string cgroup_path = 5;
 }
 
 // Add a workload to the ztunnel. this will be accompanied by ancillary data contianing

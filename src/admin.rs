@@ -212,7 +212,7 @@ async fn dump_certs(cert_manager: &SecretManager) -> Vec<CertsDump> {
     let mut dump = cert_manager
         .collect_certs(|id, certs| {
             let mut dump = CertsDump {
-                identity: id.to_string(),
+                identity: id.id().to_string(),
                 ..Default::default()
             };
             use crate::identity::CertState::*;
@@ -452,6 +452,7 @@ mod tests {
     use crate::config::ProxyConfig;
     use crate::config::construct_config;
     use crate::identity;
+    use crate::identity::manager::CAType;
     use crate::strng;
     use crate::test_helpers::{get_response_str, helpers, new_proxy_state};
     use crate::xds::istio::security::Address as XdsAddress;
@@ -512,14 +513,14 @@ mod tests {
                     .unwrap()
                     .into(),
             ),
-        });
+        }, CAType::MockCaClient);
         for i in 0..2 {
             manager
                 .fetch_certificate(&identity::Identity::Spiffe {
                     trust_domain: "trust_domain".into(),
                     namespace: "namespace".into(),
                     service_account: strng::format!("sa-{i}"),
-                })
+                }.to_composite_id())
                 .await
                 .unwrap();
             // Make sure certificates are a significant amount of time apart, for better
@@ -528,7 +529,7 @@ mod tests {
         }
 
         manager
-            .fetch_certificate(&identity("spiffe://error/ns/forgotten/sa/sa-failed"))
+            .fetch_certificate(&identity("spiffe://error/ns/forgotten/sa/sa-failed").to_composite_id())
             .await
             .unwrap_err();
 
@@ -536,7 +537,7 @@ mod tests {
         let pending_manager = manager.clone();
         let pending_fetch = tokio::task::spawn(async move {
             pending_manager
-                .fetch_certificate(&identity("spiffe://test/ns/test/sa/sa-pending"))
+                .fetch_certificate(&identity("spiffe://test/ns/test/sa/sa-pending").to_composite_id())
                 .await
         });
         tokio::time::sleep(Duration::from_nanos(1)).await;
@@ -559,7 +560,7 @@ mod tests {
             "certChain": [
               {
                 "expirationTime": "2023-03-11T12:57:26Z",
-                "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUNYRENDQVVTZ0F3SUJBZ0lVTDVaZ0toTEI1YUt3YXRuZE1sR25CZWZ3Qkxnd0RRWUpLb1pJaHZjTgpBUUVMQlFBd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZUZ3MHlNekF6TVRFd05UVTMKTWpaYUZ3MHlNekF6TVRFeE1qVTNNalphTUJneEZqQVVCZ05WQkFvTURXTnNkWE4wWlhJdWJHOWpZV3d3CldUQVRCZ2NxaGtqT1BRSUJCZ2dxaGtqT1BRTUJCd05DQUFSYXIyQm1JWUFndkptT3JTcENlRlE3OUpQeQo4Y3c0K3pFRThmcXI1N2svdW1NcDVqWFpFR0JwZWRCSVkrcWZtSlBYRWlyYTlFOTJkU21rZks1QUtNV3gKbzJrd1p6QTFCZ05WSFJFRUxqQXNoaXB6Y0dsbVptVTZMeTkwY25WemRGOWtiMjFoYVc0dmJuTXZibUZ0ClpYTndZV05sTDNOaEwzTmhMVEF3RHdZRFZSMFBBUUgvQkFVREF3ZWdBREFkQmdOVkhTVUVGakFVQmdncgpCZ0VGQlFjREFRWUlLd1lCQlFVSEF3SXdEUVlKS29aSWh2Y05BUUVMQlFBRGdnRUJBQ2xKZVJpdmpLYVkKdm5TUHhjUXZPNTNxVFpiUUdHWFc5OHI5Qm1FWGUwYm5YeXZlMWJUVlNYcWVNMXZHdE1DalJGai91dE9VCkRwcHphQVJGRlRzenN2QWdJNStwNFhpbVU4U0FwTlhUYVZjWHkwcG04c2dIWUF6U2drMExBcW1wTWJxbwpvNDB6dmFxVk9nQ1F0c2Vobkg5SCtMQXd1WDl1T08vY2J5NnRidjhrSkhrMWZOTmZ6RTlxZVUwUGFhWWQKZjZXQzhkaWliRGJoN0tjR29rSG80NDMvT05Mb0tJZU9aTFJIbXBFdDdyYnprTDl4elNlNnVZaGQ1SlNGCk55dlY2T3Zoc1FXVVpqd1BmanUvUVJUTzFPdWgrUUZYaTAxNFpvUjRVRnRZaDRjcXphcUlpYVQ0MERyMgpNTHk4eEhJUzRmM1ltUXJEei9VN1pUSG9xaWFLaVBZPQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==",
+                "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUNXekNDQVVPZ0F3SUJBZ0lVTDVaZ0toTEI1YUt3YXRuZE1sR25CZWZ3Qkxnd0RRWUpLb1pJaHZjTgpBUUVMQlFBd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZUZ3MHlNekF6TVRFd05UVTMKTWpaYUZ3MHlNekF6TVRFeE1qVTNNalphTUJneEZqQVVCZ05WQkFvTURXTnNkWE4wWlhJdWJHOWpZV3d3CldUQVRCZ2NxaGtqT1BRSUJCZ2dxaGtqT1BRTUJCd05DQUFSYXIyQm1JWUFndkptT3JTcENlRlE3OUpQeQo4Y3c0K3pFRThmcXI1N2svdW1NcDVqWFpFR0JwZWRCSVkrcWZtSlBYRWlyYTlFOTJkU21rZks1QUtNV3gKbzJnd1pqQTFCZ05WSFJFRUxqQXNoaXB6Y0dsbVptVTZMeTkwY25WemRGOWtiMjFoYVc0dmJuTXZibUZ0ClpYTndZV05sTDNOaEwzTmhMVEF3RGdZRFZSMFBBUUgvQkFRREFnV2dNQjBHQTFVZEpRUVdNQlFHQ0NzRwpBUVVGQndNQkJnZ3JCZ0VGQlFjREFqQU5CZ2txaGtpRzl3MEJBUXNGQUFPQ0FRRUFsSW4xek1jTXdjbi8KUEFoN1JvRGI2dnFzZUx6T1RyU1NWMW5qNWt6aGNMdUU0YUNMNFNWbk54SytYTnJUVXdoU3dOdGVZbXFuCnVKTG5DUVVzdS9nVjVWZUt3OGRlNDErWjYvUVhjSzMwNHZXMVl5d2NMcVNWZWd5QkcvT0NzUndvRjIzSwpVMkg1ZXdKV1RSQi9YWGl2TERkMEZsOGIwTkNCN2ZtcmRsRDlZMXlaU1g2aXJwTk1QT1Y5L1B1ckllUUkKR2hvK2dsYjlIME96Tjc5Z2JudldGbEw0RzZVaTlLbzNmeGZhUWpVVVRWbFdpMlh4VlE0MGR6VHV2cG11Ci9qRVh4M0pOQ01zRU5hb3dNYnFTZTlqck9zd0UwMy80ejJCZjBTbkRkdGRwalloN0xZZkRqWkxldTIweAp6VzlNTFM3NU1qdG4vYjV4bHlXeGFyMWh5MnAxS1E9PQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==",
                 "serialNumber": "271676055104741785552467469040731750696653685944",
                 "validFrom": "2023-03-11T05:57:26Z"
               },
@@ -579,7 +580,7 @@ mod tests {
             "certChain": [
               {
                 "expirationTime": "2023-03-11T13:57:26Z",
-                "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUNYRENDQVVTZ0F3SUJBZ0lVSlVGNVVGbU52OVhYQlFWaDFDbFk0VFNLRng4d0RRWUpLb1pJaHZjTgpBUUVMQlFBd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZUZ3MHlNekF6TVRFd05qVTMKTWpaYUZ3MHlNekF6TVRFeE16VTNNalphTUJneEZqQVVCZ05WQkFvTURXTnNkWE4wWlhJdWJHOWpZV3d3CldUQVRCZ2NxaGtqT1BRSUJCZ2dxaGtqT1BRTUJCd05DQUFSYXIyQm1JWUFndkptT3JTcENlRlE3OUpQeQo4Y3c0K3pFRThmcXI1N2svdW1NcDVqWFpFR0JwZWRCSVkrcWZtSlBYRWlyYTlFOTJkU21rZks1QUtNV3gKbzJrd1p6QTFCZ05WSFJFRUxqQXNoaXB6Y0dsbVptVTZMeTkwY25WemRGOWtiMjFoYVc0dmJuTXZibUZ0ClpYTndZV05sTDNOaEwzTmhMVEV3RHdZRFZSMFBBUUgvQkFVREF3ZWdBREFkQmdOVkhTVUVGakFVQmdncgpCZ0VGQlFjREFRWUlLd1lCQlFVSEF3SXdEUVlKS29aSWh2Y05BUUVMQlFBRGdnRUJBSWdscTIvNnJyWlIKa25UUmZqM201SnU0MmFycGlxVVNHR3A2Mks3L09zeDc5RmovZDBwdU1hMzFkMFhwS0w3N0F2QmtvcVk3CjFWejJKOHRzUkZhZEM1ZmFtQlRXdUN4OUE5R0V3WHEzQmllK2l1a2RGWjZqUTRsb2EybHVWWWFZanhUbgpqR3NLQm0xR0hwMHpacFFVNkdENzA2c2RaTjltaGlqWVA4RnpxWGg1TTlzTzQ4UldveElOUmhXd0pKejQKYUlaZWlRTlJWdkRNZm93MGtxdFFtN001TnQzanA2RkJjTzhGQkJvV0p3MXNCSitLME5XN0VuUG82Yyt0CjE5MkZ0Nmx0eXpvV1BSMnVIYUZENi9FRjZVTkowcTN1ejZicjNYRFg1Q3lrRjQxSEMrNHRSMjQ3RWhmZgpGQkpyUVc0dXAxdHAzdnZGYTdHYnl6bkZWUEc4M3dvPQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==",
+                "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUNXekNDQVVPZ0F3SUJBZ0lVSlVGNVVGbU52OVhYQlFWaDFDbFk0VFNLRng4d0RRWUpLb1pJaHZjTgpBUUVMQlFBd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZUZ3MHlNekF6TVRFd05qVTMKTWpaYUZ3MHlNekF6TVRFeE16VTNNalphTUJneEZqQVVCZ05WQkFvTURXTnNkWE4wWlhJdWJHOWpZV3d3CldUQVRCZ2NxaGtqT1BRSUJCZ2dxaGtqT1BRTUJCd05DQUFSYXIyQm1JWUFndkptT3JTcENlRlE3OUpQeQo4Y3c0K3pFRThmcXI1N2svdW1NcDVqWFpFR0JwZWRCSVkrcWZtSlBYRWlyYTlFOTJkU21rZks1QUtNV3gKbzJnd1pqQTFCZ05WSFJFRUxqQXNoaXB6Y0dsbVptVTZMeTkwY25WemRGOWtiMjFoYVc0dmJuTXZibUZ0ClpYTndZV05sTDNOaEwzTmhMVEV3RGdZRFZSMFBBUUgvQkFRREFnV2dNQjBHQTFVZEpRUVdNQlFHQ0NzRwpBUVVGQndNQkJnZ3JCZ0VGQlFjREFqQU5CZ2txaGtpRzl3MEJBUXNGQUFPQ0FRRUFtZ2g1WENwMGp6OWEKS3NvTzZBUlBVWmlKbnhDY2xobHlleUJpbkE1cEFkY0F4V2hNN2xMdklxZXNCT3hpRFdhbFR0Z2QzV29OClJGak1VMUNOa0RmQWRoZDhLSTVoaCtpS0Z3eitYK3JIMThSM0c4SDAyQTZWMnpuYVdGald0a1dvc3c4eQpySHlIYjJBaThXakRVV1dwQ21KL0M3ZUJuVEl3OHMrM2ZMZ2o4Rm5rOVZwcjdSNEovc3ppcGVoczZyRHMKQ1pCQzFKVVA0cXovUis1L3VPWHE3cnBHY05SQVlibXVZNllKbXRWVUxKRXl3THFtUjJCckVvKzFZN0VkCkpxRWFPSUdFTEVrdENNazBvZUhkRmZoWWlqZXdmRXJVbVJFSzM2Yy8xY01XMk44MFlkVUMzd1UyWHlZdwpqWUswdkxWeng3U1Q4TmcwL0xlYUdJWGtrQW1PQ3c9PQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==",
                 "serialNumber": "212692774886610945930036647276614034927450199839",
                 "validFrom": "2023-03-11T06:57:26Z"
               },
@@ -616,7 +617,7 @@ mod tests {
                     .unwrap()
                     .into(),
             ),
-        });
+        }, CAType::MockCaClient);
 
         let wl = XdsWorkload {
             addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],

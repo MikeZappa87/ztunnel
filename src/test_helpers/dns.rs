@@ -295,6 +295,7 @@ pub async fn run_dns(responses: HashMap<Name, Vec<IpAddr>>) -> anyhow::Result<Te
                 name: "local".to_string(),
                 namespace: "ns".to_string(),
                 service_account: "default".to_string(),
+                //cgroup_path: "/sys/fs/cgroup/test".to_string(),
             }),
             state.clone(),
         ),

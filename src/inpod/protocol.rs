@@ -288,6 +288,7 @@ mod tests {
             name: "test".to_string(),
             namespace: "default".to_string(),
             service_account: "defaultsvc".to_string(),
+            //cgroup_path: "/sys/fs/cgroup/unified/test".to_string(),
         };
         let uid = uid(0);
         let data = prep_request(zds::workload_request::Payload::Add(

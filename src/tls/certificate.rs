@@ -17,6 +17,7 @@ use crate::tls::{Error, IdentityVerifier, OutboundConnector};
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use itertools::Itertools;
+use x509_parser::asn1_rs::FromDer;
 use std::{cmp, iter};
 
 use rustls::client::Resumption;
@@ -226,6 +227,37 @@ fn parse_cert_multi(mut cert: &[u8]) -> Result<Vec<Certificate>, Error> {
         .collect()
 }
 
+fn parse_cert_multi_der(cert: &[u8]) -> Result<Vec<Certificate>, Error> {
+    let mut certificates = Vec::new();
+    let mut remaining_data = cert;
+    
+    while !remaining_data.is_empty() {
+        match x509_parser::parse_x509_certificate(remaining_data) {
+            Ok((remaining, parsed_cert)) => {
+                let cert_len = remaining_data.len() - remaining.len();
+                let cert_der = &remaining_data[..cert_len];
+                certificates.push(Certificate {
+                    der: cert_der.to_vec().into(),
+                    expiry: expiration(parsed_cert),
+                });
+                remaining_data = remaining;
+            }
+            Err(e) => {
+                if certificates.is_empty() {
+                    return Err(Error::CertificateParseError(format!("Invalid DER certificate: {}", e)));
+                }
+                break; // Stop parsing if we hit invalid data but have at least one cert
+            }
+        }
+    }
+    
+    if certificates.is_empty() {
+        return Err(Error::CertificateParseError("No valid certificates found".to_string()));
+    }
+    
+    Ok(certificates)
+}
+
 fn parse_key(mut key: &[u8]) -> Result<PrivateKeyDer<'static>, Error> {
     let mut reader = std::io::BufReader::new(Cursor::new(&mut key));
     let parsed = rustls_pemfile::read_one(&mut reader)
@@ -272,6 +304,47 @@ impl WorkloadCertificate {
         })
     }
 
+    pub fn new_svid(svid: spiffe::X509Svid) -> Result<WorkloadCertificate, Error> {
+        let private_key = svid.private_key();
+        let leaf = svid.leaf();
+
+        let chain = svid.cert_chain().iter().map(|c| {
+            let (_, cert) = x509_parser::parse_x509_certificate(&c.content()).unwrap();
+            Certificate {
+                der: c.content().to_vec().into(),
+                expiry: expiration(cert),
+            }
+        }).collect::<Vec<_>>();
+
+        let cert = X509Certificate::from_der(leaf.content()).unwrap();
+        let cert = Certificate {
+            der: leaf.content().to_vec().into(),
+            expiry: expiration(cert.1),
+        };
+
+        let roots = parse_cert_multi_der(svid.cert_chain().last().map_or(&[], |c| c.content()))?;
+
+        // Convert the PrivateKey struct from private_key to PrivateKeyDer
+        
+        let private_key = PrivateKeyDer::Pkcs8(private_key.content().to_vec().into());
+
+        let mut roots_store = RootCertStore::empty();
+
+        let (_valid, invalid) =
+            roots_store.add_parsable_certificates(roots.iter().map(|c| c.der.clone()));
+        if invalid > 0 {
+            tracing::warn!("warning: found {invalid} invalid root certs");
+        }
+
+        Ok(WorkloadCertificate {
+            cert,
+            private_key,
+            roots,
+            root_store: Arc::new(roots_store),
+            chain: chain,
+        })
+    }
+
     pub fn identity(&self) -> Option<Identity> {
         self.cert.identity()
     }
@@ -300,7 +373,7 @@ impl WorkloadCertificate {
 
     pub fn server_config(&self) -> Result<ServerConfig, Error> {
         let td = self.cert.identity().map(|i| match i {
-            Identity::Spiffe { trust_domain, .. } => trust_domain,
+            Identity::Spiffe { trust_domain, .. } => trust_domain, // may be more clear if we use to_owned() to denote change from borrowed to owned
         });
         let raw_client_cert_verifier = WebPkiClientVerifier::builder_with_provider(
             self.root_store.clone(),

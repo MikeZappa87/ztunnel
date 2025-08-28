@@ -41,6 +41,7 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::ops::Add;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc::error::SendError;
@@ -128,6 +129,7 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
             name: "local-source".to_string(),
             namespace: "default".to_string(),
             service_account: "default".to_string(),
+            //cgroup_path: "/sys/fs/cgroup/test".to_string(),
         }),
         illegal_ports: HashSet::new(), // for "direct" tests, since the ports are latebound, we can't test illegal ports
         fake_self_inbound: true, // for "direct" tests, since the ports are latebound, we have to do this. Yes, this is test concerns leaking into prod code
@@ -545,4 +547,12 @@ pub fn mpsc_ack<T>(buffer: usize) -> (MpscAckSender<T>, MpscAckReceiver<T>) {
     let (tx, rx) = tokio::sync::mpsc::channel::<T>(buffer);
     let (ack_tx, ack_rx) = tokio::sync::mpsc::channel::<()>(1);
     (MpscAckSender { tx, ack_rx }, MpscAckReceiver { rx, ack_tx })
+}
+
+pub fn create_fake_cgroup() -> PathBuf {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cgroup.procs");
+    std::fs::write(&path, b"1234\n").unwrap();
+    let _keep = dir.into_path(); // prevents deletion on drop
+    path
 }

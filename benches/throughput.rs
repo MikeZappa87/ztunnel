@@ -33,7 +33,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tracing::info;
-
+use crate::identity::manager::CAType;
 use ztunnel::rbac::{Authorization, RbacMatch, StringMatch};
 use ztunnel::state::workload::{InboundProtocol, Workload};
 use ztunnel::state::{DemandProxyState, ProxyRbacContext, ProxyState};
@@ -507,7 +507,7 @@ fn hbone_connections(c: &mut Criterion) {
 
     // Global setup: spin up an echo server and ztunnel instance
     let (echo_addr, ta) = rt.block_on(async move {
-        let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10));
+        let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10), CAType::MockCaClient);
         let port = 80;
         let config_source = Some(hbone_connection_config());
         let config = test_helpers::test_config_with_port_xds_addr_and_root_cert(

@@ -716,23 +716,13 @@ fn build_response(status: StatusCode) -> Response<()> {
 mod tests {
     use super::{Inbound, ProxyInputs};
     use crate::{
-        config,
-        identity::manager::mock::new_secret_manager,
-        proxy::{
-            ConnectionManager, DefaultSocketFactory, LocalWorkloadInformation,
-            h2::server::RequestParts, inbound::HboneAddress,
-        },
-        rbac::Connection,
-        state::{
-            self, DemandProxyState, WorkloadInfo,
-            service::{Endpoint, EndpointSet, Service},
-            workload::{
-                ApplicationTunnel, GatewayAddress, HealthStatus, InboundProtocol, NetworkAddress,
-                NetworkMode, Workload, application_tunnel::Protocol as AppProtocol,
-                gatewayaddress::Destination,
-            },
-        },
-        strng, test_helpers,
+        config, identity::manager::mock::new_secret_manager, proxy::{
+            h2::server::RequestParts, inbound::HboneAddress, ConnectionManager, DefaultSocketFactory, LocalWorkloadInformation
+        }, rbac::Connection, state::{
+            self, service::{Endpoint, EndpointSet, Service}, workload::{
+                application_tunnel::Protocol as AppProtocol, gatewayaddress::Destination, ApplicationTunnel, GatewayAddress, HealthStatus, InboundProtocol, NetworkAddress, NetworkMode, Workload
+            }, DemandProxyState, WorkloadInfo
+        }, strng, test_helpers
     };
     use hickory_resolver::config::{ResolverConfig, ResolverOpts};
     use http::{Method, Uri};
@@ -743,6 +733,7 @@ mod tests {
         time::Duration,
     };
     use test_case::test_case;
+    use crate::identity::manager::CAType;
 
     const CLIENT_POD_IP: &str = "10.0.0.1";
 
@@ -875,6 +866,7 @@ mod tests {
     ) {
         let state = test_state(target_waypoint).expect("state setup");
         let cfg = config::parse_config().unwrap();
+        let cfg = Arc::new(cfg);
         let conn = Connection {
             src_identity: None,
             src: format!("{CLIENT_POD_IP}:1234").parse().unwrap(),
@@ -901,12 +893,14 @@ mod tests {
                 name: wl.name.to_string(),
                 namespace: wl.namespace.to_string(),
                 service_account: wl.service_account.to_string(),
+                //cgroup_path: "/sys/fs/cgroup/test".to_string(),
             }),
             state.clone(),
-            new_secret_manager(Duration::from_secs(10)),
+            new_secret_manager(Duration::from_secs(10), CAType::MockCaClient),
+            &cfg,
         ));
         let pi = Arc::new(ProxyInputs::new(
-            Arc::new(cfg),
+            cfg,
             cm,
             state.clone(),
             metrics.clone(),

@@ -37,7 +37,7 @@ use crate::identity::SecretManager;
 use crate::signal::ShutdownTrigger;
 use crate::test_helpers::localhost_error_message;
 use crate::*;
-
+use crate::identity::manager::CAType;
 use super::helpers::*;
 
 #[derive(Clone)]
@@ -77,7 +77,7 @@ where
     F: AsyncFn(TestApp) -> FO,
 {
     initialize_telemetry();
-    let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10));
+    let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10), CAType::MockCaClient);
     info!(
         "running with config: {}",
         serde_yaml::to_string(&cfg).unwrap()

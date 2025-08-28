@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::fmt::Debug;
-use std::fs::File;
+use std::fs::{File};
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -21,7 +21,8 @@ use std::time::Duration;
 use std::{fmt, io};
 
 use hickory_proto::ProtoError;
-
+use crate::cgroup_fetch::{get_pause_pid, CgroupErr};
+use crate::inpod::WorkloadPid;
 use crate::strng::Strng;
 use rand::Rng;
 use socket2::TcpKeepalive;
@@ -32,7 +33,7 @@ use tracing::{Instrument, debug, trace, warn};
 use inbound::Inbound;
 pub use metrics::*;
 
-use crate::identity::{Identity, SecretManager};
+use crate::identity::{CompositeId, Identity, SecretManager};
 
 use crate::dns::resolver::Resolver;
 use crate::drain::DrainWatcher;
@@ -180,6 +181,29 @@ pub struct LocalWorkloadInformation {
     // full_cert_manager gives access to the full SecretManager. This MUST only be given restricted
     // access to the appropriate certificates
     full_cert_manager: Arc<SecretManager>,
+    config: Arc<config::Config>,
+}
+
+pub async fn get_workload_pid_by_uid(uid: Strng) -> io::Result<WorkloadPid> {
+    let (pid, path) = get_pause_pid("/sys/fs/cgroup/kubepods.slice", uid.as_str()).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!("failed to get pause pid from cgroup: {}", e),
+        )
+    })?;
+
+    tracing::debug!("Found pause PID: {} Path: {}", pid, path.display());
+      
+/* 
+    //This function needs to read the value of this file. Its the cgroup.procs file which contains an integer value of the pid.
+    let pid: i32 = tokio::fs::read_to_string(&cgroup_path)
+        .await
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("failed to read cgroup file {}: {}", cgroup_path, e)))?
+        .trim()
+        .parse()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("failed to parse pid from cgroup file: {}", e)))?;
+*/
+    Ok(WorkloadPid::new(pid))
 }
 
 impl LocalWorkloadInformation {
@@ -187,11 +211,13 @@ impl LocalWorkloadInformation {
         wi: Arc<WorkloadInfo>,
         state: DemandProxyState,
         cert_manager: Arc<SecretManager>,
+        config: &Arc<config::Config>,
     ) -> LocalWorkloadInformation {
         LocalWorkloadInformation {
             wi,
             state,
             full_cert_manager: cert_manager,
+            config: config.clone(),
         }
     }
 
@@ -207,12 +233,30 @@ impl LocalWorkloadInformation {
             .get_workload()
             .await
             .map_err(|_| identity::Error::UnknownWorkload(self.workload_info()))?;
+        
         let id = &Identity::Spiffe {
             trust_domain: wl.trust_domain.clone(),
             namespace: (&self.wi.namespace).into(),
             service_account: (&self.wi.service_account).into(),
         };
-        self.full_cert_manager.fetch_certificate(id).await
+        
+        if self.config.use_spire {
+            match get_workload_pid_by_uid(wl.uid.clone()).await {
+                Ok(pid) => {
+                    let comp_key = CompositeId::new(id.clone(), identity::RequestKeyEnum::Pid(pid));
+
+                    tracing::debug!("Fetching certificate for {:?}", &comp_key);
+
+                    self.full_cert_manager.fetch_certificate(&comp_key).await
+                },
+                Err(e) => {
+                    warn!(%wl.uid, %e, "failed to get pid for workload, cannot fetch certificate");
+                    return Err(identity::Error::MissingPidForSpireIdentity(id.clone()))
+                }
+            }
+        } else {
+            self.full_cert_manager.fetch_certificate(&id.to_composite_id()).await
+        }
     }
 
     pub fn workload_info(&self) -> Arc<WorkloadInfo> {
@@ -515,6 +559,8 @@ pub enum Error {
     DnsLookup(#[from] hickory_server::authority::LookupError),
     #[error("dns response had no valid IP addresses")]
     DnsEmpty,
+    #[error("failed to get pid for workload, cannot fetch certificate")]
+    PidNotFound(CgroupErr),
 }
 
 // Custom TLV for proxy protocol for the identity of the source
@@ -886,6 +932,8 @@ impl TryFrom<&http::Uri> for HboneAddress {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     #[test]
@@ -906,5 +954,5 @@ mod tests {
         assert_eq!(parse_forwarded_host(header), None);
         let header = r#"for=for;by=by;host=host;proto="pröto""#;
         assert_eq!(parse_forwarded_host(header), None);
-    }
+    } 
 }

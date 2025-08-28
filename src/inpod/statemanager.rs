@@ -148,6 +148,7 @@ impl WorkloadProxyManagerState {
                     name: wli.name,
                     namespace: wli.namespace,
                     service_account: wli.service_account,
+                    //cgroup_path: wli.cgroup_path,
                 };
                 self.add_workload(&poddata.workload_uid, info, netns)
                     .await
@@ -406,6 +407,7 @@ mod tests {
             name: "name".to_string(),
             namespace: "ns".to_string(),
             service_account: "sa".to_string(),
+            //cgroup_path: "/sys/fs/cgroup/test".to_string(),
         })
     }
 

@@ -149,6 +149,8 @@ impl crate::admin::AdminHandler for WorkloadManagerAdminHandler {
 
 #[cfg(test)]
 mod test {
+    use crate::test_helpers::create_fake_cgroup;
+
     use super::*;
 
     #[test]
@@ -156,21 +158,24 @@ mod test {
         let handler = WorkloadManagerAdminHandler::default();
         let data = || serde_json::to_string(&handler.to_json().unwrap()).unwrap();
 
+        let path = create_fake_cgroup().to_str().unwrap().to_string();
+
         let uid1 = crate::inpod::WorkloadUid::new("uid1".to_string());
         let wli = WorkloadInfo {
             name: "name".to_string(),
             namespace: "ns".to_string(),
             service_account: "sa".to_string(),
+            //cgroup_path: path.clone(),
         };
         handler.proxy_pending(&uid1, &wli);
         assert_eq!(
             data(),
-            r#"{"uid1":{"info":{"name":"name","namespace":"ns","serviceAccount":"sa"},"state":"Pending"}}"#
+            format!(r#"{{"uid1":{{"info":{{"cgroupPath":"{}","name":"name","namespace":"ns","serviceAccount":"sa"}},"state":"Pending"}}}}"#, &path)
         );
         handler.proxy_up(&uid1, &wli, None);
         assert_eq!(
             data(),
-            r#"{"uid1":{"info":{"name":"name","namespace":"ns","serviceAccount":"sa"},"state":"Up"}}"#
+            format!(r#"{{"uid1":{{"info":{{"cgroupPath":"{}","name":"name","namespace":"ns","serviceAccount":"sa"}},"state":"Up"}}}}"#, &path)
         );
         handler.proxy_down(&uid1);
         assert_eq!(data(), "{}");

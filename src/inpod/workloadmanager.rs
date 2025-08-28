@@ -417,6 +417,7 @@ pub(crate) mod tests {
             name: "name".to_string(),
             namespace: "ns".to_string(),
             service_account: "sa".to_string(),
+            //cgroup_path: "/sys/fs/cgroup/test".to_string(),
         })
     }
 

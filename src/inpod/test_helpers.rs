@@ -35,6 +35,7 @@ use crate::{dns, drain};
 use once_cell::sync::Lazy;
 use std::os::fd::{AsRawFd, OwnedFd};
 use tracing::debug;
+use crate::identity::manager::CAType;
 
 pub fn uid(i: usize) -> crate::inpod::WorkloadUid {
     crate::inpod::WorkloadUid::new(format!("uid{}", i))
@@ -70,7 +71,7 @@ impl Default for Fixture {
         };
         let state = Arc::new(RwLock::new(ProxyState::new(None)));
         let cert_manager: Arc<crate::identity::SecretManager> =
-            crate::identity::mock::new_secret_manager(std::time::Duration::from_secs(10));
+            crate::identity::mock::new_secret_manager(std::time::Duration::from_secs(10), CAType::MockCaClient);
         let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
         let (drain_tx, drain_rx) = drain::new();
         let dns_metrics = Some(dns::Metrics::new(&mut registry));

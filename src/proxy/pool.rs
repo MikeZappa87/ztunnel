@@ -512,7 +512,8 @@ mod test {
     use std::net::IpAddr;
     use std::net::SocketAddr;
     use std::time::Instant;
-
+    use crate::test_helpers::create_fake_cgroup;
+    use crate::identity::manager::CAType;
     use crate::{drain, identity, proxy};
 
     use futures_util::{StreamExt, future};
@@ -998,6 +999,7 @@ mod test {
             pool_unused_release_timeout: idle,
             ..crate::config::parse_config().unwrap()
         };
+        let cfg = Arc::new(cfg);
         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory::default());
 
         let mut state = ProxyState::new(None);
@@ -1023,11 +1025,13 @@ mod test {
                 name: wl.name.to_string(),
                 namespace: wl.namespace.to_string(),
                 service_account: wl.service_account.to_string(),
+                //cgroup_path: create_fake_cgroup().to_str().unwrap().to_string(),
             }),
             mock_proxy_state,
-            identity::mock::new_secret_manager(Duration::from_secs(10)),
+            identity::mock::new_secret_manager(Duration::from_secs(10), CAType::MockCaClient),
+            &cfg,
         ));
-        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, local_workload);
+        let pool = WorkloadHBONEPool::new(cfg.clone(), sock_fact, local_workload);
         let server = TestServer {
             conn_counter,
             drop_rx,
