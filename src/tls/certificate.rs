@@ -304,11 +304,11 @@ impl WorkloadCertificate {
         })
     }
 
-    pub fn new_svid(svid: spiffe::X509Svid) -> Result<WorkloadCertificate, Error> {
+    pub fn new_svid(svid: spiffe::X509Svid, bundle: &Vec<spiffe::cert::Certificate>) -> Result<WorkloadCertificate, Error> {
         let private_key = svid.private_key();
         let leaf = svid.leaf();
 
-        let chain = svid.cert_chain().iter().map(|c| {
+        let chain = svid.cert_chain().iter().skip(0).map(|c| {
             let (_, cert) = x509_parser::parse_x509_certificate(&c.content()).unwrap();
             Certificate {
                 der: c.content().to_vec().into(),
@@ -322,16 +322,20 @@ impl WorkloadCertificate {
             expiry: expiration(cert.1),
         };
 
-        let roots = parse_cert_multi_der(svid.cert_chain().last().map_or(&[], |c| c.content()))?;
-
-        // Convert the PrivateKey struct from private_key to PrivateKeyDer
-        
         let private_key = PrivateKeyDer::Pkcs8(private_key.content().to_vec().into());
+
+        let roots = bundle.iter().map(|c| {
+            let (_, cert) = x509_parser::parse_x509_certificate(&c.content()).unwrap();
+            Certificate {
+                der: c.content().to_vec().into(),
+                expiry: expiration(cert),
+            }
+        }).collect::<Vec<_>>();
 
         let mut roots_store = RootCertStore::empty();
 
         let (_valid, invalid) =
-            roots_store.add_parsable_certificates(roots.iter().map(|c| c.der.clone()));
+            roots_store.add_parsable_certificates(bundle.iter().map(|c| c.content().to_vec().into()));
         if invalid > 0 {
             tracing::warn!("warning: found {invalid} invalid root certs");
         }

@@ -1,4 +1,5 @@
 use rustls::pki_types::PrivateKeyDer;
+use spiffe::{bundle::BundleRefSource, TrustDomain};
 use spire_api::{DelegateAttestationRequest, DelegatedIdentityClient};
 use tonic::async_trait;
 use tracing_subscriber::field::debug;
@@ -34,7 +35,7 @@ impl SpireClient {
                 //I need to dump the certificates in a readable format.
                 for (i, cert) in req.cert_chain().iter().enumerate() {
                     let (_, parsed_cert) = x509_parser::parse_x509_certificate(&cert.content()).unwrap();
-                    tracing::debug!("Parsed Cert {}: Subject: {}, Issuer: {}, Not Before: {}, Not After: {}", i, parsed_cert.subject(), parsed_cert.issuer(), parsed_cert.validity().not_before, parsed_cert.validity().not_after);
+                    tracing::debug!("Parsed Cert Index {}: Subject: {}, Issuer: {}, Not Before: {}, Not After: {}", i, parsed_cert.subject(), parsed_cert.issuer(), parsed_cert.validity().not_before, parsed_cert.validity().not_after);
                 }
 
                 //I need to dump the leaf certificate in a readable format.
@@ -46,7 +47,16 @@ impl SpireClient {
                 let parsed_key = PrivateKeyDer::Pkcs8(pkcs8.to_vec().into());
                 tracing::debug!("Parsed Private Key: {:?}", parsed_key);
 
-                let certs = tls::WorkloadCertificate::new_svid(req)
+                let bundle_req = self.client.clone().fetch_x509_bundles()
+                .await
+                .map_err(|e| Error::Spiffe(format!("Failed to fetch X.509 bundles: {}", e)))?;
+
+                //I need to dump the bundles in a readable format.
+                tracing::debug!("Fetched X.509 bundles: {:?}", debug(&bundle_req));
+
+                let bundles = bundle_req.get_bundle(&TrustDomain::new("cluster.local").unwrap()).unwrap().authorities();
+
+                let certs = tls::WorkloadCertificate::new_svid(req, &bundles)
                     .map_err(|e| Error::Spiffe(format!("Failed to create WorkloadCertificate: {}", e)))?;
                 Ok(certs)
            },
@@ -93,6 +103,7 @@ pub mod mock {
     use std::{sync::Arc, time::Instant};
 
     use mockall::{automock, predicate::always};
+    use spiffe::{bundle, X509Bundle};
     use tokio::sync::RwLock;
 
     use crate::{identity::Identity, time::Converter, tls::WorkloadCertificate};
@@ -154,7 +165,9 @@ pub mod mock {
 
             let req = mock.fetch_x509_svid(DelegateAttestationRequest::Pid(1234)).await.unwrap();
 
-            let certs = WorkloadCertificate::new_svid(req).unwrap();
+            let bundle = spiffe::bundle::x509::X509Bundle::new(TrustDomain::new("id_or_name").unwrap());
+
+            let certs = WorkloadCertificate::new_svid(req, &bundle.authorities()).unwrap();
             Ok(certs)
             /* 
             let timeconv = Converter::new();
