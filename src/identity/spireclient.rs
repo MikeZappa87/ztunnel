@@ -1,3 +1,4 @@
+use rustls::pki_types::PrivateKeyDer;
 use spire_api::{DelegateAttestationRequest, DelegatedIdentityClient};
 use tonic::async_trait;
 use tracing_subscriber::field::debug;
@@ -27,15 +28,23 @@ impl SpireClient {
                     .map_err(|e| Error::Spiffe(format!("Failed to fetch SVID: {}", e)))?;
 
                 tracing::debug!("Fetched SVID for PID: {}", pid);
-                tracing::debug!("Private key: {:?}", req.private_key().content());
-                tracing::debug!("Leaf cert: {:?}", req.leaf().content());
                 tracing::debug!("SPIFFE ID: {}", req.spiffe_id());
                 //I need to dump the cert chain here too.
                 tracing::debug!("Certs in chain: {}", req.cert_chain().len());
-                tracing::debug!("Cert chain:");
+                //I need to dump the certificates in a readable format.
                 for (i, cert) in req.cert_chain().iter().enumerate() {
-                    tracing::debug!("Cert {}: {:?}", i, cert.content());
+                    let (_, parsed_cert) = x509_parser::parse_x509_certificate(&cert.content()).unwrap();
+                    tracing::debug!("Parsed Cert {}: Subject: {}, Issuer: {}, Not Before: {}, Not After: {}", i, parsed_cert.subject(), parsed_cert.issuer(), parsed_cert.validity().not_before, parsed_cert.validity().not_after);
                 }
+
+                //I need to dump the leaf certificate in a readable format.
+                let (_, parsed_leaf) = x509_parser::parse_x509_certificate(&req.leaf().content()).unwrap();
+                tracing::debug!("Parsed Leaf Cert: Subject: {}, Issuer: {}, Not Before: {}, Not After: {}", parsed_leaf.subject(), parsed_leaf.issuer(), parsed_leaf.validity().not_before, parsed_leaf.validity().not_after);
+
+                //I need to dump the private key in a readable format.
+                let pkcs8 = req.private_key().content();
+                let parsed_key = PrivateKeyDer::Pkcs8(pkcs8.to_vec().into());
+                tracing::debug!("Parsed Private Key: {:?}", parsed_key);
 
                 let certs = tls::WorkloadCertificate::new_svid(req)
                     .map_err(|e| Error::Spiffe(format!("Failed to create WorkloadCertificate: {}", e)))?;
