@@ -48,6 +48,7 @@ struct CertFetcherImpl {
     proxy_mode: ProxyMode,
     local_node: Option<String>,
     tx: mpsc::Sender<Request>,
+    cfg: config::Config,
 }
 
 impl CertFetcherImpl {
@@ -84,6 +85,7 @@ impl CertFetcherImpl {
             proxy_mode: cfg.proxy_mode,
             local_node: cfg.local_node.clone(),
             tx,
+            cfg: cfg.clone(),
         }
     }
 
@@ -96,7 +98,7 @@ impl CertFetcherImpl {
             // We only get certs for our own node
             Some(w.node.as_ref()) == self.local_node.as_deref() &&
             // If it doesn't support HBONE it *probably* doesn't need a cert.
-            (w.native_tunnel || w.protocol == InboundProtocol::HBONE)
+            (w.native_tunnel || w.protocol == InboundProtocol::HBONE) && !self.cfg.use_spire
     }
 }
 

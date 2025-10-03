@@ -1,5 +1,6 @@
 use spire_api::{DelegateAttestationRequest, DelegatedIdentityClient};
 use tonic::async_trait;
+use tracing_subscriber::field::debug;
 use crate::{identity::{manager::Identity, CompositeId, RequestKeyEnum}, tls::{self, Certificate, WorkloadCertificate}};
 use crate::identity::Error;
 
@@ -24,6 +25,17 @@ impl SpireClient {
                     .fetch_x509_svid(spire_api::DelegateAttestationRequest::Pid(pid))
                     .await
                     .map_err(|e| Error::Spiffe(format!("Failed to fetch SVID: {}", e)))?;
+
+                tracing::debug!("Fetched SVID for PID: {}", pid);
+                tracing::debug!("Private key: {:?}", req.private_key().content());
+                tracing::debug!("Leaf cert: {:?}", req.leaf().content());
+                tracing::debug!("SPIFFE ID: {}", req.spiffe_id());
+                //I need to dump the cert chain here too.
+                tracing::debug!("Certs in chain: {}", req.cert_chain().len());
+                tracing::debug!("Cert chain:");
+                for (i, cert) in req.cert_chain().iter().enumerate() {
+                    tracing::debug!("Cert {}: {:?}", i, cert.content());
+                }
 
                 let certs = tls::WorkloadCertificate::new_svid(req)
                     .map_err(|e| Error::Spiffe(format!("Failed to create WorkloadCertificate: {}", e)))?;
