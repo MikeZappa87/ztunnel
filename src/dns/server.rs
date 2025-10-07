@@ -1586,7 +1586,6 @@ mod tests {
                     name: "client-fake".to_string(),
                     namespace: NS1.to_string(),
                     service_account: "default".to_string(),
-                    //cgroup_path: "/sys/fs/cgroup/test".to_string(),
                 }),
                 state.clone(),
             ),
@@ -1836,7 +1835,6 @@ mod tests {
                 name: "client".to_string(),
                 namespace: NS1.to_string(),
                 service_account: "default".to_string(),
-                //cgroup_path: "/sys/fs/cgroup/test".to_string(),
             }),
             state.clone(),
         );

@@ -21,8 +21,8 @@ use std::time::Duration;
 use std::{fmt, io};
 
 use hickory_proto::ProtoError;
-use crate::cgroup_fetch::{get_pause_pid, CgroupErr};
-use crate::inpod::WorkloadPid;
+use crate::cgroup_fetch::{CgroupErr};
+use crate::inpod::{WorkloadUid};
 use crate::strng::Strng;
 use rand::Rng;
 use socket2::TcpKeepalive;
@@ -181,29 +181,6 @@ pub struct LocalWorkloadInformation {
     // full_cert_manager gives access to the full SecretManager. This MUST only be given restricted
     // access to the appropriate certificates
     full_cert_manager: Arc<SecretManager>,
-    config: Arc<config::Config>,
-}
-
-pub async fn get_workload_pid_by_uid(uid: Strng) -> io::Result<WorkloadPid> {
-    let (pid, path) = get_pause_pid("/sys/fs/cgroup/kubepods.slice", uid.as_str()).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            format!("failed to get pause pid from cgroup: {}", e),
-        )
-    })?;
-
-    tracing::debug!("Found pause PID: {} Path: {}", pid, path.display());
-      
-/* 
-    //This function needs to read the value of this file. Its the cgroup.procs file which contains an integer value of the pid.
-    let pid: i32 = tokio::fs::read_to_string(&cgroup_path)
-        .await
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("failed to read cgroup file {}: {}", cgroup_path, e)))?
-        .trim()
-        .parse()
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("failed to parse pid from cgroup file: {}", e)))?;
-*/
-    Ok(WorkloadPid::new(pid))
 }
 
 impl LocalWorkloadInformation {
@@ -211,13 +188,11 @@ impl LocalWorkloadInformation {
         wi: Arc<WorkloadInfo>,
         state: DemandProxyState,
         cert_manager: Arc<SecretManager>,
-        config: &Arc<config::Config>,
     ) -> LocalWorkloadInformation {
         LocalWorkloadInformation {
             wi,
             state,
             full_cert_manager: cert_manager,
-            config: config.clone(),
         }
     }
 
@@ -239,24 +214,10 @@ impl LocalWorkloadInformation {
             namespace: (&self.wi.namespace).into(),
             service_account: (&self.wi.service_account).into(),
         };
-        
-        if self.config.use_spire {
-            match get_workload_pid_by_uid(wl.uid.clone()).await {
-                Ok(pid) => {
-                    let comp_key = CompositeId::new(id.clone(), identity::RequestKeyEnum::Pid(pid));
 
-                    tracing::debug!("Fetching certificate for {:?}", &comp_key);
+        let key = CompositeId::new(id.clone(), identity::RequestKeyEnum::Workload(WorkloadUid::new(wl.uid.to_string())));
 
-                    self.full_cert_manager.fetch_certificate(&comp_key).await
-                },
-                Err(e) => {
-                    warn!(%wl.uid, %e, "failed to get pid for workload, cannot fetch certificate");
-                    return Err(identity::Error::MissingPidForSpireIdentity(id.clone()))
-                }
-            }
-        } else {
-            self.full_cert_manager.fetch_certificate(&id.to_composite_id()).await
-        }
+        self.full_cert_manager.fetch_certificate(&key).await
     }
 
     pub fn workload_info(&self) -> Arc<WorkloadInfo> {

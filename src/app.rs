@@ -312,7 +312,7 @@ pub async fn build(config: Arc<config::Config>) -> anyhow::Result<Bound> {
         mock_secret_manager()
     } else {
         if config.use_spire {
-            Arc::new(SecretManager::new_with_spire_client().await?)
+            Arc::new(SecretManager::new_with_spire_client(config.clone()).await?)
         } else {
             Arc::new(SecretManager::new(config.clone()).await?)
         }

@@ -1025,11 +1025,9 @@ mod test {
                 name: wl.name.to_string(),
                 namespace: wl.namespace.to_string(),
                 service_account: wl.service_account.to_string(),
-                //cgroup_path: create_fake_cgroup().to_str().unwrap().to_string(),
             }),
             mock_proxy_state,
             identity::mock::new_secret_manager(Duration::from_secs(10), CAType::MockCaClient),
-            &cfg,
         ));
         let pool = WorkloadHBONEPool::new(cfg.clone(), sock_fact, local_workload);
         let server = TestServer {

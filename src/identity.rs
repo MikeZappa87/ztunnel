@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::inpod::WorkloadPid;
 use crate::tls;
 use std::str::Utf8Error;
 use std::sync::Arc;
@@ -59,6 +60,8 @@ pub enum Error {
     BugInvalidIdentityRequest(Identity, Arc<WorkloadInfo>),
     #[error("missing pid for spire identity request: {0}")]
     MissingPidForSpireIdentity(Identity),
+    #[error("failed to fetch workload SVID: {0}")]
+    FailedToFetchWorkloadSvid(i32),
 }
 
 impl From<tls::Error> for Error {

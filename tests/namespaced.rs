@@ -1560,7 +1560,6 @@ mod namespaced {
                             name: "client".to_string(),
                             namespace: "default".to_string(),
                             service_account: "client".to_string(),
-                            //cgroup_path: "/sys/fs/cgroup/test".to_string(),
                         }),
                     )
                     .await
@@ -1581,7 +1580,6 @@ mod namespaced {
                                     name: "server".to_string(),
                                     namespace: "default".to_string(),
                                     service_account: "server".to_string(),
-                                    //cgroup_path: "/sys/fs/cgroup/test".to_string(),
                                 }),
                             )
                             .await

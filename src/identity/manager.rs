@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use crate::config::ProxyMode;
 use crate::identity::SpireClient;
-use crate::inpod::WorkloadPid;
+use crate::inpod::{WorkloadUid};
 use async_trait::async_trait;
 
 use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
@@ -156,6 +156,11 @@ pub trait CaClientTrait: Send + Sync {
     async fn fetch_certificate(&self, id: &CompositeId<RequestKeyEnum>) -> Result<tls::WorkloadCertificate, Error>;
 }
 
+#[async_trait]
+pub trait PidClientTrait: Send + Sync {
+    async fn fetch_pid(&self, uid: &WorkloadUid) -> Result<u32, Error>;
+}
+
 #[derive(PartialOrd, PartialEq, Eq, Ord, Debug, Copy, Clone)]
 pub enum Priority {
     // Needs to be in the order of the lowest priority.
@@ -221,8 +226,8 @@ pub struct CompositeId<RequestKeyEnum> {
 }
 #[derive(Eq, PartialEq, Clone, Hash, Debug)]
 pub enum RequestKeyEnum {
-    Pid(WorkloadPid),
     Identity(Identity),
+    Workload(WorkloadUid),
 }
 
 impl CompositeId<RequestKeyEnum> {
@@ -555,10 +560,10 @@ impl SecretManager {
         Ok(Self::new_with_client(caclient))
     }
 
-    pub async fn new_with_spire_client() -> Result<Self, Error> {
+    pub async fn new_with_spire_client(cfg: Arc<crate::config::Config>) -> Result<Self, Error> {
         let dc = DelegatedIdentityClient::default().await.unwrap();
 
-        let client = SpireClient::new(dc).unwrap();
+        let client = SpireClient::new(dc, cfg.cluster_domain.clone()).unwrap();
 
         Ok(Self::new_with_client(client))
     }

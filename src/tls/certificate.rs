@@ -227,37 +227,6 @@ fn parse_cert_multi(mut cert: &[u8]) -> Result<Vec<Certificate>, Error> {
         .collect()
 }
 
-fn parse_cert_multi_der(cert: &[u8]) -> Result<Vec<Certificate>, Error> {
-    let mut certificates = Vec::new();
-    let mut remaining_data = cert;
-    
-    while !remaining_data.is_empty() {
-        match x509_parser::parse_x509_certificate(remaining_data) {
-            Ok((remaining, parsed_cert)) => {
-                let cert_len = remaining_data.len() - remaining.len();
-                let cert_der = &remaining_data[..cert_len];
-                certificates.push(Certificate {
-                    der: cert_der.to_vec().into(),
-                    expiry: expiration(parsed_cert),
-                });
-                remaining_data = remaining;
-            }
-            Err(e) => {
-                if certificates.is_empty() {
-                    return Err(Error::CertificateParseError(format!("Invalid DER certificate: {}", e)));
-                }
-                break; // Stop parsing if we hit invalid data but have at least one cert
-            }
-        }
-    }
-    
-    if certificates.is_empty() {
-        return Err(Error::CertificateParseError("No valid certificates found".to_string()));
-    }
-    
-    Ok(certificates)
-}
-
 fn parse_key(mut key: &[u8]) -> Result<PrivateKeyDer<'static>, Error> {
     let mut reader = std::io::BufReader::new(Cursor::new(&mut key));
     let parsed = rustls_pemfile::read_one(&mut reader)

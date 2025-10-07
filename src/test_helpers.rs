@@ -129,7 +129,6 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
             name: "local-source".to_string(),
             namespace: "default".to_string(),
             service_account: "default".to_string(),
-            //cgroup_path: "/sys/fs/cgroup/test".to_string(),
         }),
         illegal_ports: HashSet::new(), // for "direct" tests, since the ports are latebound, we can't test illegal ports
         fake_self_inbound: true, // for "direct" tests, since the ports are latebound, we have to do this. Yes, this is test concerns leaking into prod code

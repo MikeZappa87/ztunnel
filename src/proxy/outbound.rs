@@ -780,13 +780,11 @@ mod tests {
             name: "source-workload".to_string(),
             namespace: "ns".to_string(),
             service_account: "default".to_string(),
-            //cgroup_path: "/sys/fs/cgroup/test".to_string(),
         };
         let local_workload_information = Arc::new(LocalWorkloadInformation::new(
             Arc::new(wi.clone()),
             state.clone(),
             identity::mock::new_secret_manager(Duration::from_secs(10), CAType::MockCaClient),
-            &cfg,
         ));
         let outbound = OutboundConnection {
             pi: Arc::new(ProxyInputs {

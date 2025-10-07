@@ -630,7 +630,6 @@ impl<'a> TestWorkloadBuilder<'a> {
             name: self.w.workload.name.to_string(),
             namespace: self.w.workload.namespace.to_string(),
             service_account: self.w.workload.service_account.to_string(),
-            //cgroup_path: "/sys/fs/cgroup/test".to_string(),
         };
         self.manager.workloads.push(self.w);
         if self.captured {

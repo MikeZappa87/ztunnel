@@ -893,11 +893,9 @@ mod tests {
                 name: wl.name.to_string(),
                 namespace: wl.namespace.to_string(),
                 service_account: wl.service_account.to_string(),
-                //cgroup_path: "/sys/fs/cgroup/test".to_string(),
             }),
             state.clone(),
             new_secret_manager(Duration::from_secs(10), CAType::MockCaClient),
-            &cfg,
         ));
         let pi = Arc::new(ProxyInputs::new(
             cfg,

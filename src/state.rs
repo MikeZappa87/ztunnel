@@ -131,12 +131,11 @@ impl fmt::Display for WorkloadInfo {
 }
 
 impl WorkloadInfo {
-    pub fn new(name: String, namespace: String, service_account: String/*, cgroup_path: String*/) -> Self {
+    pub fn new(name: String, namespace: String, service_account: String) -> Self {
         Self {
             name,
             namespace,
             service_account,
-            //cgroup_path,
         }
     }
 
@@ -1135,7 +1134,6 @@ mod tests {
             name: delayed_wl.name.to_string(),
             namespace: delayed_wl.namespace.to_string(),
             service_account: delayed_wl.service_account.to_string(),
-            //cgroup_path: "/sys/fs/cgroup/test".to_string(),
         };
 
         test_helpers::assert_eventually(
@@ -1164,7 +1162,6 @@ mod tests {
             name: "fake".to_string(),
             namespace: "fake".to_string(),
             service_account: "fake".to_string(),
-            //cgroup_path: "/sys/fs/cgroup/test".to_string(),
         };
 
         test_helpers::assert_eventually(
@@ -1204,7 +1201,6 @@ mod tests {
             name: delayed_wl.name.to_string(),
             namespace: delayed_wl.namespace.to_string(),
             service_account: delayed_wl.service_account.to_string(),
-            //cgroup_path: "/sys/fs/cgroup/test".to_string(),
         };
 
         let expected_wl = delayed_wl.clone();

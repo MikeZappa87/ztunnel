@@ -165,7 +165,6 @@ mod test {
             name: "name".to_string(),
             namespace: "ns".to_string(),
             service_account: "sa".to_string(),
-            //cgroup_path: path.clone(),
         };
         handler.proxy_pending(&uid1, &wli);
         assert_eq!(

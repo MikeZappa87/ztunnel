@@ -95,7 +95,6 @@ impl ProxyFactory {
             Arc::new(proxy_workload_info),
             self.state.clone(),
             self.cert_manager.clone(),
-            &self.config,
         ));
 
         // Optionally create the DNS proxy.
@@ -163,7 +162,6 @@ impl ProxyFactory {
                 Arc::new(ztunnel_workload.clone()),
                 self.state.clone(),
                 self.cert_manager.clone(),
-                &self.config,
             ));
 
             let socket_factory = Arc::new(DefaultSocketFactory(self.config.socket_config));
