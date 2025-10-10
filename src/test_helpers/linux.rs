@@ -38,7 +38,6 @@ use std::thread;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::info;
-use crate::identity::manager::CAType;
 
 /// WorkloadManager provides an interface to deploy "workloads" as part of a test. Each workload
 /// runs in its own isolated network namespace, simulating a real environment. Redirection in the "host network"
@@ -252,7 +251,7 @@ impl WorkloadManager {
                     // inside the pod's netns
                     helpers::run_command("scripts/ztunnel-redirect.sh")?;
                 }
-                let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10), CAType::MockCaClient);
+                let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10));
                 let app = crate::app::build_with_cert(Arc::new(cfg), cert_manager.clone()).await?;
                 let shutdown = app.shutdown.trigger();
 

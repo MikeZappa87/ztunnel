@@ -13,22 +13,25 @@
 // limitations under the License.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
-use std::fmt;
+use std::collections::{HashMap, HashSet};
+use std::fmt::{self, Display};
 use std::fmt::{Formatter, Write};
 use std::hash::{Hash, RandomState};
 use std::str::FromStr;
 use std::sync::Arc;
 
+use crate::cgroup_fetch::CgroupManager;
 use crate::config::ProxyMode;
 use crate::identity::SpireClient;
-use crate::inpod::{WorkloadUid};
+use crate::inpod::{WorkloadPid, WorkloadUid};
 use async_trait::async_trait;
 
+use futures::stream::FuturesUnordered;
 use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
 use spire_api::DelegatedIdentityClient;
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::time::{Duration, Instant, sleep_until};
+use x509_parser::prelude::UniqueIdentifier;
 
 use crate::{strng, tls};
 
@@ -158,7 +161,7 @@ pub trait CaClientTrait: Send + Sync {
 
 #[async_trait]
 pub trait PidClientTrait: Send + Sync {
-    async fn fetch_pid(&self, uid: &WorkloadUid) -> Result<u32, Error>;
+    async fn fetch_pid(&self, uid: &WorkloadUid) -> Result<WorkloadPid, std::io::Error>;
 }
 
 #[derive(PartialOrd, PartialEq, Eq, Ord, Debug, Copy, Clone)]
@@ -460,7 +463,7 @@ impl Worker {
                         push_increase(&mut pending, id, PendingPriority(Priority::Background, refresh_at));
                     }
                 },
-                // Initiate the next fetch.
+               // Initiate the next fetch.
                 true = maybe_sleep_until(next), if fetches.len() < self.concurrency as usize => {
                     let (id, _) = pending.pop().expect("pending should always have an element at this point");
                     processing.insert(id.to_owned(), Fetch::Processing);
@@ -563,7 +566,7 @@ impl SecretManager {
     pub async fn new_with_spire_client(cfg: Arc<crate::config::Config>) -> Result<Self, Error> {
         let dc = DelegatedIdentityClient::default().await.unwrap();
 
-        let client = SpireClient::new(dc, cfg.cluster_domain.clone()).unwrap();
+        let client = SpireClient::new(dc, cfg.cluster_domain.clone(), Box::new(CgroupManager{})).unwrap();
 
         Ok(Self::new_with_client(client))
     }
@@ -612,9 +615,9 @@ impl SecretManager {
                 let rx = st.rx.clone();
                 drop(certs);
 
-                if let Some(existing_pri) = init_pri(&rx) {
-                    if pri > existing_pri {
-                        self.post(Request::Fetch(id.clone(), pri)).await;
+                        if let Some(existing_pri) = init_pri(&rx) {
+                            if pri > existing_pri {
+                                self.post(Request::Fetch(id.clone(), pri)).await;
                     }
                 }
                 Ok(rx)
@@ -691,6 +694,15 @@ impl SecretManager {
         }
         ret
     }
+
+    // Update collect_certs to handle deduplication
+    pub async fn collect_unique_identities(&self) -> Vec<String> {
+        let certs = self.collect_certs(|composite_id, _| composite_id.id().to_string()).await;
+        let unique: std::collections::HashSet<String> = certs.into_iter().collect();
+        let mut sorted: Vec<String> = unique.into_iter().collect();
+        sorted.sort();
+        sorted
+    }
 }
 
 // Matches CertState::Initializing(pri) from a Receiver, wrapped in a function to make borrow
@@ -702,11 +714,6 @@ fn init_pri(rx: &watch::Receiver<CertState>) -> Option<Priority> {
     }
 }
 
-pub enum CAType {
-    MockCaClient,
-    MockSpireClient,
-}
-
 #[cfg(any(test, feature = "testing"))]
 pub mod mock {
     use std::{
@@ -714,9 +721,7 @@ pub mod mock {
         time::{Duration, SystemTime},
     };
 
-    use crate::identity::{caclient::mock::{self, CaClient as MockCaClient}, CAType, CaClientTrait};
-    use crate::identity::spireclient::mock::MockSpireClient;
-
+    use crate::identity::{caclient::mock::{self, CaClient as MockCaClient}, CaClientTrait};
     use super::SecretManager;
 
     pub struct Config {
@@ -725,31 +730,26 @@ pub mod mock {
         pub epoch: Option<SystemTime>,
     }
 
-    pub fn new_secret_manager(cert_lifetime: Duration, ca_type: CAType) -> Arc<SecretManager> {
+    pub fn new_secret_manager(cert_lifetime: Duration) -> Arc<SecretManager> {
         new_secret_manager_cfg(Config {
             cert_lifetime,
             fetch_latency: Duration::ZERO,
             epoch: None,
-        }, ca_type)
+        })
     }
 
     // There is no need to return Arc, but most callers want one so it simplifies the code - and we
     // don't care about the extra overhead in tests.
-    pub fn new_secret_manager_cfg(cfg: Config, ca_type: CAType) -> Arc<SecretManager> {
+    pub fn new_secret_manager_cfg(cfg: Config) -> Arc<SecretManager> {
         let time_conv = crate::time::Converter::new_at(cfg.epoch.unwrap_or_else(SystemTime::now));
 
-        let client: Box<dyn CaClientTrait> = match ca_type {
-            CAType::MockCaClient => {
+        let client: Box<dyn CaClientTrait> = 
                 Box::new(MockCaClient::new(mock::ClientConfig {
                     cert_lifetime: cfg.cert_lifetime,
                     fetch_latency: cfg.fetch_latency,
                     time_conv: time_conv.clone(),
-                }))
-            }
-            CAType::MockSpireClient => {
-                Box::new(MockSpireClient::new())
-            }
-        };
+                }));
+
         Arc::new(
             SecretManager::new_internal(
                 client,
@@ -776,7 +776,6 @@ mod tests {
     use matches::assert_matches;
 
     use crate::identity::caclient::mock::CaClient as MockCaClient;
-    use crate::identity::manager::CAType;
     use crate::identity::{self, *};
     use crate::strng;
 
@@ -834,7 +833,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn test_stress_caching() {
         let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-        let secret_manager = mock::new_secret_manager(Duration::from_millis(50), CAType::MockCaClient);
+        let secret_manager = mock::new_secret_manager(Duration::from_millis(50));
 
         for _n in 0..8 {
             tasks.push(tokio::spawn(stress_many_ids(secret_manager.clone(), 100)));
@@ -854,7 +853,7 @@ mod tests {
 
         // Certs added to the cache should be refreshed every 25 millis
         let cert_lifetime = Duration::from_millis(50);
-        let secret_manager = mock::new_secret_manager(cert_lifetime, CAType::MockCaClient);
+        let secret_manager = mock::new_secret_manager(cert_lifetime);
 
         // Start spamming fetches for that cert.
         for _n in 0..3 {
@@ -922,6 +921,7 @@ mod tests {
             fetch_latency: SEC,
             cert_lifetime: 2 * CERT_HALFLIFE,
         });
+
         let (secret_manager, worker) = SecretManager::new_internal(
             Box::new(caclient.clone()),
             SecretManagerConfig {
@@ -1084,6 +1084,45 @@ mod tests {
             let rx = test
                 .secret_manager
                 .start_fetch(&id.to_composite_id(), Priority::RealTime)
+                .await
+                .unwrap();
+            rxs.push(rx);
+        }
+        let mut rxs_iter = rxs.into_iter();
+        let want = test
+            .secret_manager
+            .wait(rxs_iter.next().unwrap())
+            .await
+            .unwrap();
+        for rx in rxs_iter {
+            let got = test.secret_manager.wait(rx).await.unwrap();
+            assert!(Arc::ptr_eq(&want, &got));
+        }
+        assert_eq!(test.caclient.fetches().await.len(), 1);
+
+        test.tear_down().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_duplicate_requests_id() {
+        let test = setup(1); //We need to support the mock spire client here maybe??
+        let id = Identity::Spiffe {
+                trust_domain: "test".into(),
+                namespace: "test".into(),
+                service_account: "id1".into(),
+            };
+
+        let mut rxs = Vec::new();
+        for _ in 1..5 {
+            let key = RequestKeyEnum::Identity(id.clone());
+            let new_id = CompositeId {
+                id: id.clone(),
+                key,
+            };
+
+            let rx = test
+                .secret_manager
+                .start_fetch(&new_id, Priority::RealTime)
                 .await
                 .unwrap();
             rxs.push(rx);

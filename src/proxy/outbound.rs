@@ -711,7 +711,6 @@ mod tests {
     };
     use crate::xds::istio::workload::{NetworkMode, Service as XdsService};
     use crate::{identity, xds};
-    use crate::identity::manager::CAType;
 
     async fn run_build_request(
         from: &str,
@@ -784,7 +783,7 @@ mod tests {
         let local_workload_information = Arc::new(LocalWorkloadInformation::new(
             Arc::new(wi.clone()),
             state.clone(),
-            identity::mock::new_secret_manager(Duration::from_secs(10), CAType::MockCaClient),
+            identity::mock::new_secret_manager(Duration::from_secs(10)),
         ));
         let outbound = OutboundConnection {
             pi: Arc::new(ProxyInputs {

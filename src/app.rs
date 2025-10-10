@@ -31,7 +31,6 @@ use crate::identity::SecretManager;
 use crate::state::ProxyStateManager;
 use crate::{admin, config, metrics, proxy, readiness, signal};
 use crate::{dns, xds};
-use crate::identity::manager::CAType;
 
 pub async fn build_with_cert(
     config: Arc<config::Config>,
@@ -322,7 +321,7 @@ pub async fn build(config: Arc<config::Config>) -> anyhow::Result<Bound> {
 
 #[cfg(feature = "testing")]
 fn mock_secret_manager() -> Arc<SecretManager> {
-    crate::identity::mock::new_secret_manager(std::time::Duration::from_secs(86400), CAType::MockCaClient)
+    crate::identity::mock::new_secret_manager(std::time::Duration::from_secs(86400))
 }
 
 #[cfg(not(feature = "testing"))]

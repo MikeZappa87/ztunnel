@@ -273,7 +273,43 @@ impl WorkloadCertificate {
         })
     }
 
-    pub fn new_svid(svid: spiffe::X509Svid, bundle: &Vec<spiffe::cert::Certificate>) -> Result<WorkloadCertificate, Error> {
+    pub fn new_svid(svid: &spiffe::X509Svid, bundle: &Vec<spiffe::cert::Certificate>) -> Result<WorkloadCertificate, Error> {
+        tracing::debug!("SPIFFE ID: {}", svid.spiffe_id());
+        //I need to dump the cert chain here too.
+        tracing::debug!("Certs in chain: {}", svid.cert_chain().len());
+        /*
+        //I need to dump the certificates in a readable format.
+        //Move this so we don't parse twice. 
+        for cert in svid.cert_chain() {
+            match x509_parser::parse_x509_certificate(&cert.content()) {
+                Ok((_, parsed_cert)) => {
+                    tracing::debug!("Parsed Cert: Subject: {}, Issuer: {}, Not Before: {}, Not After: {}", parsed_cert.subject(), parsed_cert.issuer(), parsed_cert.validity().not_before, parsed_cert.validity().not_after);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to parse certificate in chain: {}", e);
+                    //This should exit the function and return an error.
+                    return Err(Error::CertificateInvalidFormat());
+                }
+            }
+        }
+
+        //Move this so we don't parse twice. 
+        match x509_parser::parse_x509_certificate(&svid.leaf().content()) {
+            Ok((_, parsed_cert)) => {
+                tracing::debug!("Leaf Cert Parsed Successfully: Subject: {}, Issuer: {}, Not Before: {}, Not After: {}", parsed_cert.subject(), parsed_cert.issuer(), parsed_cert.validity().not_before, parsed_cert.validity().not_after);
+            }
+            Err(e) => {
+                tracing::error!("Failed to parse leaf certificate: {}", e);
+                return Err(Error::CertificateInvalidFormat());
+            }
+        };
+        */
+        //I need to dump the private key in a readable format.
+        //Move this so we don't parse twice. 
+        let pkcs8 = svid.private_key().content();
+        let parsed_key = PrivateKeyDer::Pkcs8(pkcs8.to_vec().into());
+        tracing::debug!("Parsed Private Key: {:?}", parsed_key);
+
         let private_key = svid.private_key();
         let leaf = svid.leaf();
 

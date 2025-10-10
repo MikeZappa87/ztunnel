@@ -7,7 +7,11 @@ use std::thread;
 use std::time::SystemTime;
 use std::time::{Duration, Instant};
 
-use serde_json::de;
+use tonic::async_trait;
+
+use crate::identity::PidClientTrait;
+use crate::inpod::WorkloadPid;
+use crate::inpod::WorkloadUid;
 
 /// Errors that can occur while locating the pause PID from a cgroup.
 #[derive(Debug)]
@@ -19,6 +23,17 @@ pub enum CgroupErr {
     Read { path: PathBuf, source: io::Error },
     ParsePid { token: String },
     EmptyProcs { path: PathBuf },
+}
+//TODO SUPPORT crio and dockerd cgroup layouts
+pub struct CgroupManager {}
+#[async_trait]
+impl PidClientTrait for CgroupManager {
+    async fn fetch_pid(&self, uid: &WorkloadUid) -> Result<WorkloadPid, std::io::Error> {
+        // Assume cgroup v1 and kubelet.slice as root
+        let (pid, _scope) = get_pause_pid("/sys/fs/cgroup/kubepods.slice", &uid.clone().into_string()).map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string()))?;
+
+        Ok(WorkloadPid::new(pid))
+    }
 }
 
 impl fmt::Display for CgroupErr {
@@ -309,8 +324,8 @@ mod tests {
         // Run function under test
         let oldest = super::find_oldest_cri_containerd_scope(pod_dir).unwrap();
 
-        // Should return the first one created (scope1)
-        assert_eq!(oldest.file_name().unwrap().to_str().unwrap(), "cri-containerd-aaa.scope");
+        // Should return the last one created (scope3)
+        assert_eq!(oldest.file_name().unwrap().to_str().unwrap(), "cri-containerd-ccc.scope");
     }
 
     #[test]

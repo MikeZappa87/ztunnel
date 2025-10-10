@@ -452,7 +452,6 @@ mod tests {
     use crate::config::ProxyConfig;
     use crate::config::construct_config;
     use crate::identity;
-    use crate::identity::manager::CAType;
     use crate::strng;
     use crate::test_helpers::{get_response_str, helpers, new_proxy_state};
     use crate::xds::istio::security::Address as XdsAddress;
@@ -513,7 +512,7 @@ mod tests {
                     .unwrap()
                     .into(),
             ),
-        }, CAType::MockCaClient);
+        });
         for i in 0..2 {
             manager
                 .fetch_certificate(&identity::Identity::Spiffe {
@@ -617,7 +616,7 @@ mod tests {
                     .unwrap()
                     .into(),
             ),
-        }, CAType::MockCaClient);
+        });
 
         let wl = XdsWorkload {
             addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],

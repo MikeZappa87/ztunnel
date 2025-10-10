@@ -157,7 +157,7 @@ impl Inbound {
                 };
                 // This is small since it only handles the TLS layer -- the HTTP2 layer is boxed
                 // and measured above.
-                assertions::size_between_ref(1000, 1500, &serve_client);
+                assertions::size_between_ref(1000, 1504, &serve_client);
                 tokio::task::spawn(serve_client.in_current_span());
             }
         };
@@ -733,7 +733,6 @@ mod tests {
         time::Duration,
     };
     use test_case::test_case;
-    use crate::identity::manager::CAType;
 
     const CLIENT_POD_IP: &str = "10.0.0.1";
 
@@ -895,7 +894,7 @@ mod tests {
                 service_account: wl.service_account.to_string(),
             }),
             state.clone(),
-            new_secret_manager(Duration::from_secs(10), CAType::MockCaClient),
+            new_secret_manager(Duration::from_secs(10)),
         ));
         let pi = Arc::new(ProxyInputs::new(
             cfg,

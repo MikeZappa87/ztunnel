@@ -58,10 +58,18 @@ pub enum Error {
     Forgotten,
     #[error("BUG: identity requested {0}, but only allowed {1:?}")]
     BugInvalidIdentityRequest(Identity, Arc<WorkloadInfo>),
-    #[error("missing pid for spire identity request: {0}")]
-    MissingPidForSpireIdentity(Identity),
-    #[error("failed to fetch workload SVID: {0}")]
-    FailedToFetchWorkloadSvid(i32),
+    #[error("failed to fetch pid for workload: {0}")]
+    FailedToFetchPidForWorkload(i32),
+    #[error("failed to fetch bundle: {0}")]
+    FailedToFetchBundle(String),
+    #[error("certificate is in invalid format")]
+    CertificateInvalidFormat(),
+    #[error("invalid trust domain: {0}")]
+    InvalidTrustDomain(String),
+    #[error("failed to fetch certificate for workload: {0}")]
+    FailedToFetchCertificate(String),
+    #[error("unsupported key format: {0}")]
+    UnsupportedKeyFormat(String),
 }
 
 impl From<tls::Error> for Error {
