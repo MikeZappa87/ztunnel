@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
-use std::fmt::{self, Display};
+use std::collections::{HashMap};
+use std::fmt::{self};
 use std::fmt::{Formatter, Write};
 use std::hash::{Hash, RandomState};
 use std::str::FromStr;
@@ -26,12 +26,10 @@ use crate::identity::SpireClient;
 use crate::inpod::{WorkloadPid, WorkloadUid};
 use async_trait::async_trait;
 
-use futures::stream::FuturesUnordered;
 use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
 use spire_api::DelegatedIdentityClient;
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::time::{Duration, Instant, sleep_until};
-use x509_parser::prelude::UniqueIdentifier;
 
 use crate::{strng, tls};
 
@@ -132,6 +130,20 @@ impl Identity {
     pub fn trust_domain(&self) -> Strng {
         match self {
             Identity::Spiffe { trust_domain, .. } => trust_domain.clone(),
+            _ => "".into(),
+        }
+    }
+
+     pub fn ns(&self) -> Strng {
+        match self {
+            Identity::Spiffe { namespace, .. } => namespace.clone(),
+            _ => "".into(),
+        }
+    }
+
+    pub fn sa(&self) -> Strng {
+        match self {
+            Identity::Spiffe { service_account, .. } => service_account.clone(),
             _ => "".into(),
         }
     }
@@ -566,7 +578,7 @@ impl SecretManager {
     pub async fn new_with_spire_client(cfg: Arc<crate::config::Config>) -> Result<Self, Error> {
         let dc = DelegatedIdentityClient::default().await.unwrap();
 
-        let client = SpireClient::new(dc, cfg.cluster_domain.clone(), Box::new(CgroupManager{})).unwrap();
+        let client = SpireClient::new(dc, cfg.cluster_domain.clone(), Box::new(CgroupManager{}), cfg).unwrap();
 
         Ok(Self::new_with_client(client))
     }

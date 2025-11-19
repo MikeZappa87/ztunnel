@@ -117,6 +117,8 @@ const LOCALHOST_APP_TUNNEL: &str = "LOCALHOST_APP_TUNNEL";
 
 const USE_SPIRE: &str = "USE_SPIRE";
 
+const SPIRE_MODE: &str = "SPIRE_MODE";
+
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
     File(PathBuf),
@@ -148,6 +150,13 @@ pub enum ProxyMode {
     #[default]
     Shared,
     Dedicated,
+}
+
+#[derive(serde::Serialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpireMode {
+    ByPid,
+    #[default]
+    BySelectors,
 }
 
 #[derive(Clone, Debug)]
@@ -317,6 +326,7 @@ pub struct Config {
 
     pub ipv6_enabled: bool,
     pub use_spire: bool,
+    pub spire_mode: SpireMode,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -872,6 +882,20 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         ztunnel_workload,
         ipv6_enabled,
         use_spire: parse_default(USE_SPIRE, false)?,
+        spire_mode: match parse::<String>(SPIRE_MODE)? {
+            Some(mode) => match mode.as_str() {
+                "Pid" => SpireMode::ByPid,
+                "Selectors" => SpireMode::BySelectors,
+                _ => {
+                    return Err(Error::EnvVar(
+                        SPIRE_MODE.to_string(),
+                        mode,
+                        "SPIRE_MODE must be one of 'Pid' or 'Selectors'".to_string(),
+                    ));
+                }
+            },
+            None => SpireMode::BySelectors,
+        },
         ztunnel_pid: None,
     })
 }
