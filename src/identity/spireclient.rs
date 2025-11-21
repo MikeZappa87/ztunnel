@@ -1,8 +1,10 @@
+use std::sync::Arc;
+
 use futures::StreamExt;
 use spiffe::{TrustDomain};
 use spire_api::{DelegateAttestationRequest, DelegatedIdentityClient, selectors::{K8s, Selector}};
 use tonic::async_trait;
-use crate::{identity::{Error, Identity}, tls};
+use crate::{config::{Config, SpireMode}, identity::{CompositeId, Error, Identity, PidClientTrait, RequestKeyEnum}, inpod::WorkloadUid, tls};
 
 /// SPIRE client that fetches X.509 certificates for workload identities using
 /// Kubernetes selectors (namespace + service account) rather than PIDs.
@@ -12,6 +14,8 @@ pub struct SpireClient {
     client: DelegatedIdentityClient,
     /// SPIFFE trust domain (e.g., "cluster.local") used for certificate validation
     trust_domain: String,
+    pid: Option<Box<dyn PidClientTrait>>,
+    cfg: Arc<Config>
 }
 
 impl SpireClient {
@@ -20,8 +24,8 @@ impl SpireClient {
     /// # Arguments
     /// * `client` - Configured DelegatedIdentityClient for SPIRE communication
     /// * `trust_domain` - SPIFFE trust domain string for this cluster
-    pub fn new(client: DelegatedIdentityClient, trust_domain: String) -> Self {
-        SpireClient { client, trust_domain }
+    pub fn new(client: DelegatedIdentityClient, trust_domain: String, pid: Option<Box<dyn PidClientTrait>>, cfg: Arc<Config>) -> Self {
+        SpireClient { client, trust_domain, pid, cfg }
     }
 
     /// Fetches a workload certificate using Kubernetes selectors (namespace + service account).
@@ -43,10 +47,43 @@ impl SpireClient {
         selectors.push(Selector::K8s(K8s::Namespace(id.ns().to_string())));
         selectors.push(Selector::K8s(K8s::ServiceAccount(id.sa().to_string())));
 
+        Ok(self.get_cert_from_spire(DelegateAttestationRequest::Selectors(selectors)).await?)
+    }
+
+    /// Fetches a workload certificate using Kubernetes pid.
+    /// This method implements a streaming approach to handle SPIRE's async certificate delivery.
+    /// 
+    /// # Arguments
+    /// * `pid` - The container process ID for the workload
+    /// 
+    /// # Returns
+    /// A WorkloadCertificate containing the X.509 certificate and private key
+    /// 
+    /// # Errors
+    /// Returns error if stream setup fails, no certificates are received within timeout,
+    /// or certificate construction fails.
+    async fn get_cert_by_pid(&self, pid: i32) -> Result<tls::WorkloadCertificate, Error> {
+        Ok(self.get_cert_from_spire(DelegateAttestationRequest::Pid(pid)).await?)
+    }
+
+    async fn get_cert_by_workload_uid(&self, wl_uid: &WorkloadUid) -> Result<tls::WorkloadCertificate, Error> {
+        match &self.pid {
+            Some(pid_client) => {
+                let pid = pid_client.fetch_pid(wl_uid).await;
+                match pid {
+                    Ok(pid) => self.get_cert_by_pid(pid.into_i32()).await,
+                    Err(e) => Err(Error::UnableToDeterminePidForWorkload(format!("Failed to fetch PID for workload UID {}: {}", wl_uid.clone().into_string(), e))),
+                }
+            },
+            None => Err(Error::InvalidConfiguration("PID client not configured for workload UID attestation".to_string()))
+        }
+    }
+
+    async fn get_cert_from_spire(&self, value: DelegateAttestationRequest) -> Result<tls::WorkloadCertificate, Error> {
         // Initiate streaming request to SPIRE server using Kubernetes selectors
         // clone() is cheap here as DelegatedIdentityClient uses Arc internally
         let mut stream = self.client.clone()
-            .stream_x509_svids(DelegateAttestationRequest::Selectors(selectors))
+            .stream_x509_svids(value)
             .await
             .map_err(|e| Error::FailedToFetchCertificate(format!("Failed to stream X.509 SVIDs: {e}")))?;
 
@@ -139,7 +176,16 @@ impl crate::identity::CaClientTrait for SpireClient {
     /// 
     /// # Returns
     /// WorkloadCertificate that can be used for TLS operations
-    async fn fetch_certificate(&self, id: &Identity) -> Result<tls::WorkloadCertificate, Error> {
-        return self.get_cert_by_selector(&id).await;
+    async fn fetch_certificate(&self, id: &CompositeId<RequestKeyEnum>) -> Result<tls::WorkloadCertificate, Error> {
+        if self.cfg.spire_mode == SpireMode::ByPid {
+            match id.key() {
+                RequestKeyEnum::Workload(wl_uid) => {
+                    self.get_cert_by_workload_uid(&wl_uid).await
+                }
+                _ => Err(Error::InvalidConfiguration("PID mode requires workload UID for attestation".to_string()))
+            }
+        } else {
+            self.get_cert_by_selector(&id.id()).await
+        }
     }
 }

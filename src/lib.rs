@@ -42,6 +42,7 @@ pub mod time;
 pub mod tls;
 pub mod version;
 pub mod xds;
+pub mod cgroup_fetch;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod test_helpers;

@@ -65,6 +65,12 @@ pub enum Error {
     InvalidTrustDomain(String),
     #[error("failed to fetch certificate for workload: {0}")]
     FailedToFetchCertificate(String),
+    #[error("failed to fetch pid for workload: {0}")]
+    FailedToFetchPidForWorkload(i32),
+    #[error("unable to determine pid for workload: {0}")]
+    UnableToDeterminePidForWorkload(String),
+    #[error("invalid configuration: {0}")]
+    InvalidConfiguration(String),
 }
 
 impl From<tls::Error> for Error {

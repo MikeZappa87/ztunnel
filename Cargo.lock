@@ -4857,6 +4857,7 @@ dependencies = [
  "spiffe",
  "spire-api",
  "split-iter",
+ "tempfile",
  "test-case",
  "textnonce",
  "thiserror 2.0.17",
