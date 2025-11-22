@@ -20,7 +20,6 @@ use std::hash::{Hash, RandomState};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::cgroup_fetch::CgroupManager;
 use crate::config::ProxyMode;
 use crate::container_runtime::ContainerRuntimeManager;
 use crate::inpod::WorkloadUid;

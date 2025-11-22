@@ -42,7 +42,6 @@ pub mod time;
 pub mod tls;
 pub mod version;
 pub mod xds;
-pub mod cgroup_fetch;
 pub mod container_runtime;
 
 #[cfg(any(test, feature = "testing"))]
