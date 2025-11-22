@@ -118,6 +118,8 @@ const SPIRE_ENABLED: &str = "SPIRE_ENABLED";
 
 const SPIRE_MODE: &str = "SPIRE_MODE";
 
+const CONTAINER_RUNTIME_SOCK_PATH: &str = "CONTAINER_RUNTIME_SOCK_PATH";
+
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
     File(PathBuf),
@@ -324,6 +326,7 @@ pub struct Config {
     pub ipv6_enabled: bool,
     pub spire_enabled: bool,
     pub spire_mode: SpireMode,
+    pub container_runtime_sock_path: Option<String>,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -893,6 +896,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             },
             None => SpireMode::BySelectors,
         },
+        container_runtime_sock_path: Some(parse_default(CONTAINER_RUNTIME_SOCK_PATH, "/run/containerd/containerd.sock".to_string())?),
     })
 }
 

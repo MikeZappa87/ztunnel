@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use crate::cgroup_fetch::CgroupManager;
 use crate::config::ProxyMode;
+use crate::container_runtime::ContainerRuntimeManager;
 use crate::inpod::WorkloadUid;
 use async_trait::async_trait;
 use crate::identity::SpireClient;
@@ -654,7 +655,11 @@ impl SecretManager {
         let dc = DelegatedIdentityClient::default().await?;
 
         let pid_client = match cfg.spire_mode {
-            crate::config::SpireMode::ByPid => Some(Box::new(CgroupManager{}) as Box<dyn PidClientTrait>),
+            crate::config::SpireMode::ByPid => {
+                let pid_client = ContainerRuntimeManager::new(&cfg).await.expect("unable to connect to container runtime");
+
+                Some(Box::new(pid_client) as Box<dyn PidClientTrait>)
+            },
             crate::config::SpireMode::BySelectors => None,
         };
 

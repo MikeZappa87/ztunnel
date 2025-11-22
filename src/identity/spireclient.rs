@@ -1,5 +1,4 @@
 use std::sync::Arc;
-
 use futures::StreamExt;
 use spiffe::{TrustDomain};
 use spire_api::{DelegateAttestationRequest, DelegatedIdentityClient, selectors::{K8s, Selector}};
@@ -62,16 +61,46 @@ impl SpireClient {
     /// # Errors
     /// Returns error if stream setup fails, no certificates are received within timeout,
     /// or certificate construction fails.
-    async fn get_cert_by_pid(&self, pid: i32) -> Result<tls::WorkloadCertificate, Error> {
-        Ok(self.get_cert_from_spire(DelegateAttestationRequest::Pid(pid)).await?)
+    async fn get_cert_by_pid(&self, pid: i32, wl_uid: &WorkloadUid) -> Result<tls::WorkloadCertificate, Error> {
+        let certs = self.get_cert_from_spire(DelegateAttestationRequest::Pid(pid)).await;
+
+        match &self.pid {
+            Some(pid_client) => {
+               let pid_verify = pid_client.fetch_pid(wl_uid).await;
+
+               match pid_verify {
+                   Ok(fetched_pid) => {
+                       if fetched_pid.into_i32() != pid {
+                           return Err(Error::UnableToDeterminePidForWorkload(format!(
+                               "PID mismatch for workload UID {}: expected {}, got {}",
+                               wl_uid.clone().into_string(),
+                               pid,
+                               fetched_pid.into_i32()
+                           )));
+                       }
+                   },
+                   Err(e) => {
+                       return Err(Error::UnableToDeterminePidForWorkload(format!(
+                           "Failed to verify PID for workload UID {}: {}",
+                           wl_uid.clone().into_string(),
+                           e
+                       )));
+                   }
+               }
+            },
+            None => {}
+        }
+
+        Ok(certs?)
     }
 
     async fn get_cert_by_workload_uid(&self, wl_uid: &WorkloadUid) -> Result<tls::WorkloadCertificate, Error> {
         match &self.pid {
             Some(pid_client) => {
+                tracing::info!("Fetching PID for workload UID: {}", wl_uid.clone().into_string());
                 let pid = pid_client.fetch_pid(wl_uid).await;
                 match pid {
-                    Ok(pid) => self.get_cert_by_pid(pid.into_i32()).await,
+                    Ok(pid) => self.get_cert_by_pid(pid.into_i32(), wl_uid).await,
                     Err(e) => Err(Error::UnableToDeterminePidForWorkload(format!("Failed to fetch PID for workload UID {}: {}", wl_uid.clone().into_string(), e))),
                 }
             },
