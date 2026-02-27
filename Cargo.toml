@@ -22,6 +22,11 @@ name = "ztunnel"
 path = "src/main.rs"
 bench = false
 
+[[bin]]
+name = "zds-client"
+path = "src/bin/zds-client.rs"
+bench = false
+
 [[bench]]
 name = "throughput"
 harness = false

@@ -1,0 +1,105 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: zds-tools
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: zds-server
+  namespace: zds-tools
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zds-server
+  namespace: zds-tools
+spec:
+  type: ClusterIP
+  selector:
+    app: zds-server
+  ports:
+  - name: xds
+    port: 15010
+    targetPort: 15010
+    protocol: TCP
+---
+# DaemonSet so zds-server runs on every node (like istio-cni)
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: zds-server
+  namespace: zds-tools
+spec:
+  selector:
+    matchLabels:
+      app: zds-server
+  template:
+    metadata:
+      labels:
+        app: zds-server
+    spec:
+      serviceAccountName: zds-server
+      hostNetwork: false
+      # Tolerations to run on all nodes including control-plane
+      tolerations:
+      - effect: NoSchedule
+        operator: Exists
+      - key: CriticalAddonsOnly
+        operator: Exists
+      - effect: NoExecute
+        operator: Exists
+      containers:
+      - name: zds-server
+        image: zds-tools:latest
+        imagePullPolicy: Never
+        args:
+        - "--zds-socket"
+        - "/var/run/ztunnel/ztunnel.sock"
+        - "--control-socket"
+        - "/var/run/ztunnel/control.sock"
+        - "--xds-port"
+        - "15010"
+        ports:
+        - containerPort: 15010
+          name: xds
+        securityContext:
+          privileged: false
+        volumeMounts:
+        - name: ztunnel-socket
+          mountPath: /var/run/ztunnel
+        - name: run-netns
+          mountPath: /run/netns
+          mountPropagation: HostToContainer
+        readinessProbe:
+          tcpSocket:
+            port: 15010
+          initialDelaySeconds: 2
+          periodSeconds: 5
+      volumes:
+      # Use hostPath so ztunnel on the node can connect to the socket
+      - name: ztunnel-socket
+        hostPath:
+          path: /var/run/ztunnel
+      # Network namespaces for ZDS add command
+      - name: run-netns
+        hostPath:
+          path: /run/netns
+          type: DirectoryOrCreate
+---
+# A standalone client pod for running commands
+apiVersion: v1
+kind: Pod
+metadata:
+  name: zds-client
+  namespace: zds-tools
+  labels:
+    app: zds-client
+spec:
+  serviceAccountName: zds-server
+  containers:
+  - name: zds-client
+    image: zds-tools:latest
+    imagePullPolicy: Never
+    command: ["/bin/sh", "-c", "sleep infinity"]
+  restartPolicy: Never
