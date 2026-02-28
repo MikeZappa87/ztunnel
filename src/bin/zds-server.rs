@@ -56,16 +56,18 @@ use ztunnel::xds::istio::workload::{
     Address as XdsAddress, Workload as XdsWorkload, TunnelProtocol, WorkloadStatus, WorkloadType,
     address::Type as AddressType,
 };
-use ztunnel::xds::ADDRESS_TYPE;
+use ztunnel::xds::{ADDRESS_TYPE, AUTHORIZATION_TYPE};
 
 const DEFAULT_ZDS_SOCKET: &str = "/var/run/ztunnel/ztunnel.sock";
 const DEFAULT_CONTROL_SOCKET: &str = "/var/run/ztunnel/control.sock";
+const DEFAULT_XDS_SOCKET: &str = "/var/run/ztunnel/xds.sock";
 const DEFAULT_XDS_PORT: u16 = 15010;
 
 #[derive(Debug)]
 struct Args {
     zds_socket: PathBuf,
     control_socket: PathBuf,
+    xds_socket: Option<PathBuf>,  // If set, use UDS instead of TCP
     xds_port: u16,
 }
 
@@ -145,13 +147,14 @@ USAGE:
 OPTIONS:
     --zds-socket <PATH>      ZDS socket path for ztunnel (default: /var/run/ztunnel/ztunnel.sock)
     --control-socket <PATH>  Control socket for CLI (default: /var/run/ztunnel/control.sock)
-    --xds-port <PORT>        XDS gRPC port for WDS (default: 15010)
+    --xds-socket <PATH>      XDS UDS path (if set, uses UDS instead of TCP)
+    --xds-port <PORT>        XDS gRPC port for WDS (default: 15010, ignored if --xds-socket is set)
     --help                   Print this help message
 
 The server listens on three endpoints:
 1. ZDS socket: ztunnel connects here for CNI protocol (SEQPACKET)
 2. Control socket: CLI connects here to send commands (STREAM)
-3. XDS port: ztunnel connects here for workload discovery (gRPC)
+3. XDS port/socket: ztunnel connects here for workload discovery (gRPC)
 
 ZDS CONTROL COMMANDS (for CNI protocol):
     add <uid> <name> <namespace> <service_account> <netns_path>
@@ -167,7 +170,12 @@ WDS CONTROL COMMANDS (for XDS workload discovery):
     wds-get <uid>
 
 EXAMPLE:
-    # Start the server
+    # Start the server with UDS for XDS (recommended)
+    zds-server --zds-socket /var/run/ztunnel/ztunnel.sock \
+               --control-socket /var/run/ztunnel/control.sock \
+               --xds-socket /var/run/ztunnel/xds.sock
+
+    # Start the server with TCP for XDS
     zds-server --zds-socket /var/run/ztunnel/ztunnel.sock \
                --control-socket /var/run/ztunnel/control.sock \
                --xds-port 15010
@@ -183,8 +191,8 @@ EXAMPLE:
     # List WDS workloads
     zds-client send --control-socket /var/run/ztunnel/control.sock wds-list
 
-    # Configure ztunnel to use this server for XDS:
-    XDS_ADDRESS=<server-ip>:15010 ztunnel
+    # Configure ztunnel to use this server for XDS via UDS:
+    XDS_ADDRESS=unix:///var/run/ztunnel/xds.sock ztunnel
 "#
     );
 }
@@ -193,6 +201,7 @@ fn parse_args() -> Result<Args> {
     let mut args = std::env::args().skip(1).peekable();
     let mut zds_socket = PathBuf::from(DEFAULT_ZDS_SOCKET);
     let mut control_socket = PathBuf::from(DEFAULT_CONTROL_SOCKET);
+    let mut xds_socket: Option<PathBuf> = None;
     let mut xds_port = DEFAULT_XDS_PORT;
 
     while let Some(arg) = args.next() {
@@ -208,6 +217,12 @@ fn parse_args() -> Result<Args> {
                     args.next()
                         .ok_or_else(|| anyhow!("--control-socket requires a path"))?,
                 );
+            }
+            "--xds-socket" => {
+                xds_socket = Some(PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| anyhow!("--xds-socket requires a path"))?,
+                ));
             }
             "--xds-port" => {
                 xds_port = args.next()
@@ -228,6 +243,7 @@ fn parse_args() -> Result<Args> {
     Ok(Args {
         zds_socket,
         control_socket,
+        xds_socket,
         xds_port,
     })
 }
@@ -478,17 +494,25 @@ fn create_zds_listener(path: &PathBuf) -> Result<OwnedFd> {
     Ok(socket)
 }
 
-/// Accept a connection from ztunnel - returns just the fd
-fn accept_ztunnel(listener_fd: RawFd) -> Result<OwnedFd> {
+/// Accept a connection from ztunnel - returns Ok(Some(fd)) on success,
+/// Ok(None) if no connection pending (EAGAIN), Err on real errors
+fn accept_ztunnel(listener_fd: RawFd) -> Result<Option<OwnedFd>> {
+    use nix::errno::Errno;
     // Use blocking socket for the connected client so recv_ack can wait for responses
-    let fd = socket::accept4(
-        listener_fd,
-        SockFlag::SOCK_CLOEXEC,  // Blocking socket - no NONBLOCK
-    ).context("Failed to accept connection")?;
-
-    eprintln!("[ZDS] Ztunnel connected!");
-
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    match socket::accept4(listener_fd, SockFlag::SOCK_CLOEXEC) {
+        Ok(fd) => {
+            eprintln!("[ZDS] Ztunnel connected!");
+            Ok(Some(unsafe { OwnedFd::from_raw_fd(fd) }))
+        }
+        Err(Errno::EAGAIN) | Err(Errno::EWOULDBLOCK) => {
+            Ok(None) // No pending connection, not an error
+        }
+        Err(e) => {
+            // Debug: print what error we're actually getting
+            eprintln!("[ZDS] DEBUG: Got error {:?} (raw: {})", e, e as i32);
+            Err(anyhow::anyhow!("Accept failed: {}", e))
+        }
+    }
 }
 
 // ============================================================================
@@ -619,52 +643,88 @@ impl AggregatedDiscoveryService for XdsService {
         // Spawn handler for this client connection
         tokio::spawn(async move {
             let mut nonce_counter = 0u64;
+            let mut sent_address = false;
+            let mut sent_authorization = false;
 
-            // Wait for initial request
-            match request_stream.message().await {
-                Ok(Some(req)) => {
-                    eprintln!("[XDS] Received request: type_url={}", req.type_url);
-                    
-                    // Send initial snapshot
-                    let nonce = format!("nonce-{}", nonce_counter);
-                    nonce_counter += 1;
-                    
-                    let store_clone = store.clone();
-                    let response = store_clone.inner.read().await;
-                    let workloads: Vec<_> = response.workloads.values().cloned().collect();
-                    drop(response);
-                    
-                    let resources: Vec<Resource> = workloads.iter().map(|w| {
-                        let xds = XdsService::workload_to_xds(w);
-                        Resource {
-                            name: w.uid.clone(),
-                            resource: Some(prost_types::Any {
-                                type_url: ADDRESS_TYPE.to_string(),
-                                value: xds.encode_to_vec(),
-                            }),
-                            ..Default::default()
+            // Wait for initial request and handle multiple subscriptions
+            loop {
+                match request_stream.message().await {
+                    Ok(Some(req)) => {
+                        let type_url = req.type_url.clone();
+                        eprintln!("[XDS] Received request: type_url={} nonce={}", type_url, req.response_nonce);
+
+                        // If this is an ACK (has response_nonce), don't send a new response
+                        if !req.response_nonce.is_empty() {
+                            continue;
                         }
-                    }).collect();
+                        
+                        // Handle initial subscriptions for different types
+                        if type_url == ADDRESS_TYPE.to_string() && !sent_address {
+                            // Send initial snapshot for Address type
+                            let nonce = format!("nonce-{}", nonce_counter);
+                            nonce_counter += 1;
+                            
+                            let store_clone = store.clone();
+                            let response = store_clone.inner.read().await;
+                            let workloads: Vec<_> = response.workloads.values().cloned().collect();
+                            drop(response);
+                            
+                            let resources: Vec<Resource> = workloads.iter().map(|w| {
+                                let xds = XdsService::workload_to_xds(w);
+                                Resource {
+                                    name: w.uid.clone(),
+                                    resource: Some(prost_types::Any {
+                                        type_url: ADDRESS_TYPE.to_string(),
+                                        value: xds.encode_to_vec(),
+                                    }),
+                                    ..Default::default()
+                                }
+                            }).collect();
 
-                    let initial_response = DeltaDiscoveryResponse {
-                        type_url: ADDRESS_TYPE.to_string(),
-                        resources,
-                        nonce,
-                        ..Default::default()
-                    };
+                            let initial_response = DeltaDiscoveryResponse {
+                                type_url: ADDRESS_TYPE.to_string(),
+                                resources,
+                                nonce,
+                                ..Default::default()
+                            };
 
-                    eprintln!("[XDS] Sending {} resources", initial_response.resources.len());
-                    if tx.send(Ok(initial_response)).await.is_err() {
+                            eprintln!("[XDS] Sending {} Address resources", initial_response.resources.len());
+                            if tx.send(Ok(initial_response)).await.is_err() {
+                                return;
+                            }
+                            sent_address = true;
+                        } else if type_url == AUTHORIZATION_TYPE.to_string() && !sent_authorization {
+                            // Send empty Authorization response
+                            let nonce = format!("nonce-{}", nonce_counter);
+                            nonce_counter += 1;
+                            
+                            let empty_response = DeltaDiscoveryResponse {
+                                type_url: AUTHORIZATION_TYPE.to_string(),
+                                resources: vec![],
+                                nonce,
+                                ..Default::default()
+                            };
+
+                            eprintln!("[XDS] Sending empty Authorization response");
+                            if tx.send(Ok(empty_response)).await.is_err() {
+                                return;
+                            }
+                            sent_authorization = true;
+                        }
+
+                        // Once we've handled both initial subscriptions, break to event loop
+                        if sent_address && sent_authorization {
+                            break;
+                        }
+                    }
+                    Ok(None) => {
+                        eprintln!("[XDS] Client closed connection");
                         return;
                     }
-                }
-                Ok(None) => {
-                    eprintln!("[XDS] Client closed connection");
-                    return;
-                }
-                Err(e) => {
-                    eprintln!("[XDS] Error receiving request: {}", e);
-                    return;
+                    Err(e) => {
+                        eprintln!("[XDS] Error receiving request: {}", e);
+                        return;
+                    }
                 }
             }
 
@@ -675,7 +735,7 @@ impl AggregatedDiscoveryService for XdsService {
                     msg = request_stream.message() => {
                         match msg {
                             Ok(Some(req)) => {
-                                eprintln!("[XDS] Received ACK/request: nonce={}", req.response_nonce);
+                                eprintln!("[XDS] Received ACK/request: type_url={} nonce={}", req.type_url, req.response_nonce);
                             }
                             Ok(None) => {
                                 eprintln!("[XDS] Client disconnected");
@@ -721,7 +781,11 @@ async fn main() -> Result<()> {
     eprintln!("ZDS Server starting...");
     eprintln!("  ZDS socket: {:?}", args.zds_socket);
     eprintln!("  Control socket: {:?}", args.control_socket);
-    eprintln!("  XDS port: {}", args.xds_port);
+    if let Some(ref xds_socket) = args.xds_socket {
+        eprintln!("  XDS socket: {:?}", xds_socket);
+    } else {
+        eprintln!("  XDS port: {}", args.xds_port);
+    }
 
     // Create WDS workload store
     let workload_store = WorkloadStore::new();
@@ -744,18 +808,41 @@ async fn main() -> Result<()> {
 
     // Start XDS gRPC server
     let xds_service = XdsService::new(workload_store.clone());
-    let xds_addr: SocketAddr = format!("0.0.0.0:{}", args.xds_port).parse()?;
-    eprintln!("[XDS] Starting gRPC server on {}", xds_addr);
     
-    tokio::spawn(async move {
-        if let Err(e) = tonic::transport::Server::builder()
-            .add_service(AggregatedDiscoveryServiceServer::new(xds_service))
-            .serve(xds_addr)
-            .await
-        {
-            eprintln!("[XDS] Server error: {}", e);
+    if let Some(xds_socket) = args.xds_socket {
+        // Use UDS for XDS
+        let _ = std::fs::remove_file(&xds_socket);
+        if let Some(parent) = xds_socket.parent() {
+            std::fs::create_dir_all(parent)?;
         }
-    });
+        let uds_listener = tokio::net::UnixListener::bind(&xds_socket)?;
+        eprintln!("[XDS] Starting gRPC server on UDS {:?}", xds_socket);
+        
+        tokio::spawn(async move {
+            let incoming = tokio_stream::wrappers::UnixListenerStream::new(uds_listener);
+            if let Err(e) = tonic::transport::Server::builder()
+                .add_service(AggregatedDiscoveryServiceServer::new(xds_service))
+                .serve_with_incoming(incoming)
+                .await
+            {
+                eprintln!("[XDS] Server error: {}", e);
+            }
+        });
+    } else {
+        // Use TCP for XDS
+        let xds_addr: SocketAddr = format!("0.0.0.0:{}", args.xds_port).parse()?;
+        eprintln!("[XDS] Starting gRPC server on {}", xds_addr);
+        
+        tokio::spawn(async move {
+            if let Err(e) = tonic::transport::Server::builder()
+                .add_service(AggregatedDiscoveryServiceServer::new(xds_service))
+                .serve(xds_addr)
+                .await
+            {
+                eprintln!("[XDS] Server error: {}", e);
+            }
+        });
+    }
 
     // Spawn control socket handler
     let cmd_tx_clone = cmd_tx.clone();
@@ -786,7 +873,7 @@ async fn main() -> Result<()> {
             _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
                 // Always try to accept new connections (each ztunnel gets its own)
                 match accept_ztunnel(zds_listener.as_raw_fd()) {
-                    Ok(fd) => {
+                    Ok(Some(fd)) => {
                         let id = conn_manager.add(fd);
                         eprintln!("[ZDS] New ztunnel connection (id={}), total: {}", id, conn_manager.len());
                         
@@ -803,14 +890,11 @@ async fn main() -> Result<()> {
                             }
                         }
                     }
+                    Ok(None) => {
+                        // No pending connection - this is normal (EAGAIN)
+                    }
                     Err(e) => {
-                        // EAGAIN/EWOULDBLOCK means no connection yet
-                        let is_would_block = e.to_string().contains("EAGAIN") 
-                            || e.to_string().contains("EWOULDBLOCK")
-                            || e.to_string().contains("Resource temporarily unavailable");
-                        if !is_would_block {
-                            eprintln!("[ZDS] Accept error: {}", e);
-                        }
+                        eprintln!("[ZDS] Accept error: {}", e);
                     }
                 }
             }

@@ -1,0 +1,365 @@
+# SPIRE deployment for ztunnel - replaces istiod CA
+# This provides SPIFFE/SVID certificates to ztunnel via the Workload API
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: spire
+---
+# SPIRE Server ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spire-server
+  namespace: spire
+data:
+  server.conf: |
+    server {
+      bind_address = "0.0.0.0"
+      bind_port = "8081"
+      trust_domain = "cluster.local"
+      data_dir = "/run/spire/data"
+      log_level = "INFO"
+      ca_ttl = "24h"
+      default_x509_svid_ttl = "1h"
+      
+      ca_subject {
+        country = ["US"]
+        organization = ["SPIRE"]
+        common_name = ""
+      }
+    }
+
+    plugins {
+      DataStore "sql" {
+        plugin_data {
+          database_type = "sqlite3"
+          connection_string = "/run/spire/data/datastore.sqlite3"
+        }
+      }
+
+      NodeAttestor "k8s_psat" {
+        plugin_data {
+          clusters = {
+            "ztunnel-test" = {
+              service_account_allow_list = ["spire:spire-agent"]
+            }
+          }
+        }
+      }
+
+      KeyManager "memory" {
+        plugin_data {}
+      }
+
+      UpstreamAuthority "disk" {
+        plugin_data {
+          key_file_path = "/run/spire/secrets/bootstrap.key"
+          cert_file_path = "/run/spire/secrets/bootstrap.crt"
+        }
+      }
+    }
+
+    health_checks {
+      listener_enabled = true
+      bind_address = "0.0.0.0"
+      bind_port = "8080"
+      live_path = "/live"
+      ready_path = "/ready"
+    }
+---
+# SPIRE Server Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: spire-server
+  namespace: spire
+spec:
+  type: ClusterIP
+  selector:
+    app: spire-server
+  ports:
+  - name: grpc
+    port: 8081
+    targetPort: 8081
+---
+# SPIRE Server ServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spire-server
+  namespace: spire
+---
+# SPIRE Server ClusterRole - needs to validate tokens
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: spire-server
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["authentication.k8s.io"]
+  resources: ["tokenreviews"]
+  verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: spire-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: spire-server
+subjects:
+- kind: ServiceAccount
+  name: spire-server
+  namespace: spire
+---
+# Bootstrap CA - self-signed for testing (P-256 curve)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: spire-bootstrap
+  namespace: spire
+type: Opaque
+stringData:
+  bootstrap.key: |
+    -----BEGIN EC PRIVATE KEY-----
+    MHcCAQEEIO0LlE6CYdQ2QweYRHFXvdwKsyfdzNrH2BwuTku7LnNEoAoGCCqGSM49
+    AwEHoUQDQgAExiXQvB7Lrly7+FG/Zx73odHBFC+/RIpUNYH/LMa+LZsdPiDhsBp1
+    uLi71aclU4WhjSsnBsamyPKEqabbnkFlQA==
+    -----END EC PRIVATE KEY-----
+  bootstrap.crt: |
+    -----BEGIN CERTIFICATE-----
+    MIIBijCCAS+gAwIBAgIUF5MAZJct4zQY2TvHzhZ0hlEvuyAwCgYIKoZIzj0EAwIw
+    GjEYMBYGA1UEAwwPc3BpcmUtYm9vdHN0cmFwMB4XDTI2MDIyODA0MjAzNFoXDTM2
+    MDIyNjA0MjAzNFowGjEYMBYGA1UEAwwPc3BpcmUtYm9vdHN0cmFwMFkwEwYHKoZI
+    zj0CAQYIKoZIzj0DAQcDQgAExiXQvB7Lrly7+FG/Zx73odHBFC+/RIpUNYH/LMa+
+    LZsdPiDhsBp1uLi71aclU4WhjSsnBsamyPKEqabbnkFlQKNTMFEwHQYDVR0OBBYE
+    FMTPp6aG1TWSQneDuzNbo+OTigI2MB8GA1UdIwQYMBaAFMTPp6aG1TWSQneDuzNb
+    o+OTigI2MA8GA1UdEwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDSQAwRgIhAL+1iPUD
+    0rUB1H1II7BuWw/48/X/eM+PCJ/5xR811646AiEAh1gQ6wKGOPOJoGrf+Xi89GQt
+    QeFoFAYJbk4kmhx4Fqo=
+    -----END CERTIFICATE-----
+---
+# SPIRE Server StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: spire-server
+  namespace: spire
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spire-server
+  serviceName: spire-server
+  template:
+    metadata:
+      labels:
+        app: spire-server
+    spec:
+      serviceAccountName: spire-server
+      containers:
+      - name: spire-server
+        image: ghcr.io/spiffe/spire-server:1.9.0
+        args:
+        - "-config"
+        - "/run/spire/config/server.conf"
+        ports:
+        - containerPort: 8081
+        livenessProbe:
+          httpGet:
+            path: /live
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        volumeMounts:
+        - name: spire-config
+          mountPath: /run/spire/config
+          readOnly: true
+        - name: spire-secrets
+          mountPath: /run/spire/secrets
+          readOnly: true
+        - name: spire-data
+          mountPath: /run/spire/data
+      volumes:
+      - name: spire-config
+        configMap:
+          name: spire-server
+      - name: spire-secrets
+        secret:
+          secretName: spire-bootstrap
+      - name: spire-data
+        emptyDir: {}
+---
+# SPIRE Agent ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spire-agent
+  namespace: spire
+data:
+  agent.conf: |
+    agent {
+      data_dir = "/run/spire"
+      log_level = "INFO"
+      server_address = "spire-server"
+      server_port = "8081"
+      socket_path = "/run/spire/sockets/agent.sock"
+      trust_domain = "cluster.local"
+      admin_socket_path = "/run/spire/admin/admin.sock"
+      insecure_bootstrap = true
+    }
+
+    plugins {
+      NodeAttestor "k8s_psat" {
+        plugin_data {
+          cluster = "ztunnel-test"
+        }
+      }
+
+      KeyManager "memory" {
+        plugin_data {}
+      }
+
+      WorkloadAttestor "k8s" {
+        plugin_data {
+          skip_kubelet_verification = true
+        }
+      }
+    }
+
+    health_checks {
+      listener_enabled = true
+      bind_address = "0.0.0.0"
+      bind_port = "8080"
+      live_path = "/live"
+      ready_path = "/ready"
+    }
+---
+# SPIRE Agent ServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spire-agent
+  namespace: spire
+---
+# SPIRE Agent ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: spire-agent
+rules:
+- apiGroups: [""]
+  resources: ["pods", "nodes", "nodes/proxy"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: spire-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: spire-agent
+subjects:
+- kind: ServiceAccount
+  name: spire-agent
+  namespace: spire
+---
+# SPIRE Agent DaemonSet
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: spire-agent
+  namespace: spire
+spec:
+  selector:
+    matchLabels:
+      app: spire-agent
+  template:
+    metadata:
+      labels:
+        app: spire-agent
+    spec:
+      serviceAccountName: spire-agent
+      hostPID: true
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # Run on all nodes including control-plane
+      tolerations:
+      - effect: NoSchedule
+        operator: Exists
+      - key: CriticalAddonsOnly
+        operator: Exists
+      - effect: NoExecute
+        operator: Exists
+      initContainers:
+      - name: init-socket-dir
+        image: busybox:1.36
+        command: ["sh", "-c", "mkdir -p /run/spire/sockets /run/spire/admin && chmod 777 /run/spire/sockets /run/spire/admin"]
+        volumeMounts:
+        - name: spire-sockets
+          mountPath: /run/spire/sockets
+        - name: spire-admin
+          mountPath: /run/spire/admin
+      containers:
+      - name: spire-agent
+        image: ghcr.io/spiffe/spire-agent:1.9.0
+        args:
+        - "-config"
+        - "/run/spire/config/agent.conf"
+        livenessProbe:
+          httpGet:
+            path: /live
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 5
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: spire-config
+          mountPath: /run/spire/config
+          readOnly: true
+        - name: spire-sockets
+          mountPath: /run/spire/sockets
+        - name: spire-admin
+          mountPath: /run/spire/admin
+        - name: spire-token
+          mountPath: /var/run/secrets/tokens
+      volumes:
+      - name: spire-config
+        configMap:
+          name: spire-agent
+      - name: spire-sockets
+        hostPath:
+          path: /run/spire/sockets
+          type: DirectoryOrCreate
+      - name: spire-admin
+        hostPath:
+          path: /run/spire/admin
+          type: DirectoryOrCreate
+      - name: spire-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              audience: spire-server
+              expirationSeconds: 7200
+              path: spire-agent
