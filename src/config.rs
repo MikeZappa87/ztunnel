@@ -787,7 +787,12 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             pc.stats_port.unwrap_or(DEFAULT_STATS_PORT),
         )),
         // readiness probe should only be accessible over localhost (kubelet runs on same node)
-        readiness_addr: Address::Localhost(ipv6_localhost_enabled, DEFAULT_READINESS_PORT),
+        // However, in some Kubernetes setups (like Kind), the kubelet connects to the pod IP
+        // Rather than localhost, so we bind to all interfaces for compatibility.
+        readiness_addr: Address::SocketAddr(SocketAddr::new(
+            bind_wildcard,
+            DEFAULT_READINESS_PORT,
+        )),
 
         socks5_addr,
         inbound_addr,
@@ -927,6 +932,10 @@ fn validate_uri(uri_str: Option<String>) -> Result<Option<String>, Error> {
     let Some(uri_str) = uri_str else {
         return Ok(uri_str);
     };
+    // Unix socket URIs don't need standard URI validation
+    if uri_str.starts_with("unix://") {
+        return Ok(Some(uri_str));
+    }
     let uri = Uri::try_from(&uri_str)?;
     if uri.scheme().is_none() {
         return Ok(Some("https://".to_owned() + &uri_str));

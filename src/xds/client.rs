@@ -14,6 +14,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{Display, Formatter};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt, mem};
@@ -622,15 +623,10 @@ impl AdsClient {
         };
 
         let addr = self.config.address.clone();
-        let tls_grpc_channel = tls::grpc_connector(
-            self.config.address.clone(),
-            self.config.auth.clone(),
-            self.config
-                .tls_builder
-                .fetch_cert(self.config.alt_hostname.clone())
-                .await?,
-        )?;
-
+        
+        // Check if address is a Unix socket
+        let is_uds = addr.starts_with("unix://");
+        
         let mut req = tonic::Request::new(outbound);
         self.config.xds_headers.iter().for_each(|(k, v)| {
             req.metadata_mut().insert(k.clone(), v.clone());
@@ -640,14 +636,36 @@ impl AdsClient {
             }
         });
 
-        let ads_connection = AggregatedDiscoveryServiceClient::new(tls_grpc_channel)
-            .max_decoding_message_size(200 * 1024 * 1024)
-            .delta_aggregated_resources(req)
-            .await;
-
-        let mut response_stream = ads_connection
-            .map_err(|src| Error::Connection(addr, src))?
-            .into_inner();
+        let mut response_stream = if is_uds {
+            // Unix domain socket - plaintext gRPC
+            let socket_path = PathBuf::from(addr.strip_prefix("unix://").unwrap());
+            info!("connecting to XDS via UDS: {:?}", socket_path);
+            let uds_channel = tls::uds_grpc_channel(socket_path).await?;
+            let ads_connection = AggregatedDiscoveryServiceClient::new(uds_channel)
+                .max_decoding_message_size(200 * 1024 * 1024)
+                .delta_aggregated_resources(req)
+                .await;
+            ads_connection
+                .map_err(|src| Error::Connection(self.config.address.clone(), src))?
+                .into_inner()
+        } else {
+            // TCP with TLS
+            let tls_grpc_channel = tls::grpc_connector(
+                self.config.address.clone(),
+                self.config.auth.clone(),
+                self.config
+                    .tls_builder
+                    .fetch_cert(self.config.alt_hostname.clone())
+                    .await?,
+            )?;
+            let ads_connection = AggregatedDiscoveryServiceClient::new(tls_grpc_channel)
+                .max_decoding_message_size(200 * 1024 * 1024)
+                .delta_aggregated_resources(req)
+                .await;
+            ads_connection
+                .map_err(|src| Error::Connection(self.config.address.clone(), src))?
+                .into_inner()
+        };
         debug!("connected established");
 
         info!("Stream established");

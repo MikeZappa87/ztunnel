@@ -20,17 +20,22 @@ use hyper::Uri;
 use hyper::body::Incoming;
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::rt::TokioIo;
 use itertools::Itertools;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use std::future::Future;
 use std::io::Cursor;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
+use tokio::net::UnixStream;
 use tonic::body::Body;
+use tonic::transport::{Channel, Endpoint};
+use tower::service_fn;
 use tracing::debug;
 
 async fn root_to_store(root_cert: &RootCert) -> Result<rustls::RootCertStore, Error> {
@@ -274,4 +279,22 @@ impl tower::Service<http::Request<Body>> for TlsGrpcChannel {
             Ok(client.request(req).await?)
         })
     }
+}
+
+/// Creates a gRPC channel over Unix Domain Socket for plaintext communication.
+/// This is used when XDS_ADDRESS starts with "unix://".
+pub async fn uds_grpc_channel(socket_path: PathBuf) -> Result<Channel, Error> {
+    debug!("creating UDS gRPC channel to {:?}", socket_path);
+    let endpoint: Endpoint = Endpoint::try_from("http://[::1]:50051")
+        .map_err(|e| Error::InvalidRootCert(format!("invalid endpoint: {}", e)))?;
+    let channel = endpoint
+        .connect_with_connector(service_fn(move |_: Uri| {
+            let path = socket_path.clone();
+            async move {
+                Ok::<_, std::io::Error>(TokioIo::new(UnixStream::connect(path).await?))
+            }
+        }))
+        .await
+        .map_err(|e| Error::InvalidRootCert(format!("UDS connection error: {}", e)))?;
+    Ok(channel)
 }
