@@ -130,6 +130,12 @@ const SPIRE_ADMIN_SOCKET: &str = "SPIRE_ADMIN_ENDPOINT_SOCKET";
 
 const CONTAINER_RUNTIME_SOCK_PATH: &str = "CONTAINER_RUNTIME_SOCK_PATH";
 
+// Determines how ztunnel fetches PIDs for workloads when using SPIRE.
+// "cri" = use CRI container runtime API (default)
+// "manifest" = read from manifest.json files in INSTANCES_DIR
+const PID_SOURCE: &str = "PID_SOURCE";
+const INSTANCES_DIR: &str = "INSTANCES_DIR";
+
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
     File(PathBuf),
@@ -335,6 +341,11 @@ pub struct Config {
     pub spire_timeout: Duration,
     pub spire_admin_socket: String,
     pub container_runtime_sock_path: String,
+    /// Source for PID fetching: "cri" (default) or "manifest"
+    pub pid_source: String,
+    /// Directory containing instance manifest.json files (used when pid_source="manifest")
+    /// Each instance has a subdirectory with a config.json containing shimProcessId.
+    pub instances_dir: String,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -903,6 +914,8 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             CONTAINER_RUNTIME_SOCK_PATH,
             "/run/containerd/containerd.sock".to_string(),
         )?,
+        pid_source: parse_default(PID_SOURCE, "cri".to_string())?,
+        instances_dir: parse_default(INSTANCES_DIR, "/instances".to_string())?,
         spire_timeout: parse_duration_default(SPIRE_TIMEOUT, Duration::from_secs(10))?,
         spire_admin_socket: parse_default(
             SPIRE_ADMIN_SOCKET,

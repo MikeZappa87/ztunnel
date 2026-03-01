@@ -29,6 +29,7 @@ pub mod hyper_util;
 pub mod identity;
 #[cfg(target_os = "linux")]
 pub mod inpod;
+pub mod manifest_pid;
 pub mod metrics;
 pub mod proxy;
 pub mod proxyfactory;

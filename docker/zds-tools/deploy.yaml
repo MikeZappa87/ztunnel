@@ -46,8 +46,14 @@ spec:
         - "/var/run/ztunnel/control.sock"
         - "--xds-socket"
         - "/var/run/ztunnel/xds.sock"
+        - "--upstream-xds"
+        - "http://xds-aggregator.zds-tools:15010"
         securityContext:
           privileged: false
+          capabilities:
+            add:
+            - NET_ADMIN
+            - SYS_ADMIN
         volumeMounts:
         - name: ztunnel-socket
           mountPath: /var/run/ztunnel

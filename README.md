@@ -15,6 +15,21 @@ Upstream ztunnel only supports Istio's built-in CA for certificate issuance. Thi
 
 This is a temporary fork, not a permanent divergence. The goal is to upstream the SPIRE CA support to Istio's ztunnel repository.
 
+### Testing Without Istiod
+
+This fork includes standalone tooling to run ztunnel with SPIRE as the CA, without requiring istiod or Cilium:
+
+| Directory | Description |
+|-----------|-------------|
+| [`docker/spire/`](docker/spire/README.md) | SPIRE server + agent deployment (replaces istiod CA) |
+| [`docker/zds-tools/`](docker/zds-tools/README.md) | ZDS/XDS/WDS test server, CLI client, iptables redirect, multi-cluster POC |
+| [`scripts/README.md`](scripts/README.md) | Simulated non-K8s workloads with network namespace isolation |
+
+Key requirements:
+- **SPIRE >= 1.10.0** for PID-based delegate attestation
+- **HBONE protocol** in WDS entries for mTLS (not TCP)
+- SPIRE agent `authorized_delegates` must include ztunnel's SPIFFE ID
+
 ## Feature Scope
 
 Ztunnel is intended to be a purpose built implementation of the node proxy in [ambient mesh](https://istio.io/latest/blog/2022/introducing-ambient-mesh/).

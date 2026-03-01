@@ -24,6 +24,7 @@ use crate::config::ProxyMode;
 use crate::container_runtime::ContainerRuntimeManager;
 use crate::identity::{DelegatedIdentityApi, SpireClient};
 use crate::inpod::WorkloadUid;
+use crate::manifest_pid::ManifestPidFetcher;
 use crate::{strng, tls};
 use async_trait::async_trait;
 use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
@@ -722,11 +723,24 @@ impl SecretManager {
         cfg: Arc<crate::config::Config>,
         dc: C,
     ) -> Result<Self, spiffe::error::GrpcClientError> {
-        let pid_client = ContainerRuntimeManager::new(&cfg)
-            .await
-            .expect("unable to connect to container runtime");
+        let pid_client: Box<dyn PidClientTrait> = match cfg.pid_source.as_str() {
+            "manifest" => {
+                tracing::info!(
+                    "Using manifest-based PID fetcher with instances_dir={}",
+                    cfg.instances_dir
+                );
+                Box::new(ManifestPidFetcher::new(cfg.instances_dir.clone()))
+            }
+            _ => {
+                tracing::info!("Using CRI container runtime PID fetcher");
+                let cri = ContainerRuntimeManager::new(&cfg)
+                    .await
+                    .expect("unable to connect to container runtime");
+                Box::new(cri)
+            }
+        };
 
-        let client = SpireClient::new(dc, cfg.cluster_domain.clone(), Box::new(pid_client), cfg);
+        let client = SpireClient::new(dc, cfg.cluster_domain.clone(), pid_client, cfg);
 
         Ok(Self::new_with_client(client))
     }

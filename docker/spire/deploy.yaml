@@ -1,5 +1,16 @@
 # SPIRE deployment for ztunnel - replaces istiod CA
 # This provides SPIFFE/SVID certificates to ztunnel via the Workload API
+#
+# Post-deploy: create registration entries for workload identities:
+#   kubectl exec -n spire spire-server-0 -- /opt/spire/bin/spire-server entry create \
+#     -spiffeID spiffe://cluster.local/ns/cluster-a/sa/default \
+#     -parentID spiffe://cluster.local/agent \
+#     -selector k8s:ns:cluster-a -selector k8s:sa:default
+#
+#   kubectl exec -n spire spire-server-0 -- /opt/spire/bin/spire-server entry create \
+#     -spiffeID spiffe://cluster.local/ns/cluster-b/sa/default \
+#     -parentID spiffe://cluster.local/agent \
+#     -selector k8s:ns:cluster-b -selector k8s:sa:default
 
 apiVersion: v1
 kind: Namespace
@@ -166,7 +177,7 @@ spec:
       serviceAccountName: spire-server
       containers:
       - name: spire-server
-        image: ghcr.io/spiffe/spire-server:1.9.0
+        image: ghcr.io/spiffe/spire-server:1.10.4
         args:
         - "-config"
         - "/run/spire/config/server.conf"
@@ -220,6 +231,7 @@ data:
       trust_domain = "cluster.local"
       admin_socket_path = "/run/spire/admin/admin.sock"
       insecure_bootstrap = true
+      authorized_delegates = ["spiffe://cluster.local/ns/istio-system/sa/ztunnel"]
     }
 
     plugins {
@@ -316,7 +328,10 @@ spec:
           mountPath: /run/spire/admin
       containers:
       - name: spire-agent
-        image: ghcr.io/spiffe/spire-agent:1.9.0
+        # image: ghcr.io/spiffe/spire-agent:1.10.4
+        # this is my image I build locally with the latest SPIRE code - replace with official image for testing
+        image: spire-agent:latest
+        imagePullPolicy: Never
         args:
         - "-config"
         - "/run/spire/config/agent.conf"

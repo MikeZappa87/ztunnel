@@ -1,0 +1,146 @@
+# Multi-cluster POC on a single Kind cluster
+#
+# Architecture:
+#   - Central XDS aggregator: Deployment running zds-server on TCP port 15010
+#     Holds the global view of all workloads (populated via wds-add commands)
+#   - Per-node zds-server (DaemonSet): Connects upstream to the aggregator
+#     to pull remote workloads, merges with local ZDS-enrolled pods,
+#     and pushes the combined set to the local ztunnel via XDS UDS.
+#
+# Usage:
+#   1. Deploy: kubectl apply -f multi-cluster-poc.yaml
+#   2. Register workloads on the aggregator (use HBONE protocol for mTLS):
+#      kubectl exec -n zds-tools deploy/xds-aggregator -- \
+#        zds-client send --control-socket /tmp/control.sock \
+#        wds-add <UID> <NAME> <NAMESPACE> <SA> <IP> HBONE <NODE>
+#
+#      Example:
+#        wds-add "1f2a6d30-..." "web-a" "cluster-a" "default" "10.244.3.5" HBONE "ztunnel-test-worker"
+#
+#      Note: Using TCP instead of HBONE will result in plaintext passthrough (no mTLS).
+#   3. The per-node zds-servers will automatically relay these to local ztunnels
+
+---
+# Central XDS Aggregator (simulates central control plane)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: xds-aggregator
+  namespace: zds-tools
+  labels:
+    app: xds-aggregator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: xds-aggregator
+  template:
+    metadata:
+      labels:
+        app: xds-aggregator
+    spec:
+      serviceAccountName: zds-server
+      tolerations:
+      - effect: NoSchedule
+        operator: Exists
+      containers:
+      - name: xds-aggregator
+        image: zds-tools:local
+        imagePullPolicy: Never
+        command: ["/usr/local/bin/zds-server"]
+        args:
+        - "--zds-socket"
+        - "/tmp/zds.sock"
+        - "--control-socket"
+        - "/tmp/control.sock"
+        - "--xds-port"
+        - "15010"
+        ports:
+        - containerPort: 15010
+          name: xds
+          protocol: TCP
+---
+# Service for the aggregator so per-node zds-servers can reach it
+apiVersion: v1
+kind: Service
+metadata:
+  name: xds-aggregator
+  namespace: zds-tools
+spec:
+  selector:
+    app: xds-aggregator
+  ports:
+  - port: 15010
+    targetPort: 15010
+    protocol: TCP
+    name: xds
+---
+# Test namespace "cluster-a" (simulates workloads from cluster A)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cluster-a
+---
+# Test namespace "cluster-b" (simulates workloads from cluster B)  
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cluster-b
+---
+# Sample workload in cluster-a
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-a
+  namespace: cluster-a
+  labels:
+    app: web-a
+spec:
+  containers:
+  - name: nginx
+    image: nginx:latest
+    ports:
+    - containerPort: 80
+---
+# Sample workload in cluster-b
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-b
+  namespace: cluster-b
+  labels:
+    app: web-b
+spec:
+  containers:
+  - name: nginx
+    image: nginx:latest
+    ports:
+    - containerPort: 80
+---
+# Curl pod in cluster-a for testing connectivity
+apiVersion: v1
+kind: Pod
+metadata:
+  name: curl-a
+  namespace: cluster-a
+  labels:
+    app: curl-a
+spec:
+  containers:
+  - name: curl
+    image: curlimages/curl:latest
+    command: ["sleep", "infinity"]
+---
+# Curl pod in cluster-b for testing connectivity
+apiVersion: v1
+kind: Pod
+metadata:
+  name: curl-b
+  namespace: cluster-b
+  labels:
+    app: curl-b
+spec:
+  containers:
+  - name: curl
+    image: curlimages/curl:latest
+    command: ["sleep", "infinity"]
