@@ -20,24 +20,24 @@ use crate::identity::{PidClientTrait, WorkloadPid};
 use crate::inpod::WorkloadUid;
 
 /// Manifest JSON structure read from instance directories.
-/// Located at `{instances_dir}/{instanceID}/config.json`.
+/// Located at `{instances_dir}/{instanceID}/manifest.json`.
 #[derive(serde::Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct Manifest {
-    /// The shim process ID — this is the PID we need.
-    #[serde(alias = "shimProcessId")]
-    shim_process_id: i32,
-    // Other fields exist but we only need shimProcessId.
+    /// The VMM process ID — this is the PID we need.
+    #[serde(alias = "vmmProcessId")]
+    vmm_process_id: i32,
+    // Other fields exist but we only need vmmProcessId.
 }
 
 /// A PID fetcher that reads from manifest.json files on disk.
 ///
 /// For each workload UID, it looks for a manifest file at:
-///   `{instances_dir}/{instanceID}/config.json`
+///   `{instances_dir}/{instanceID}/manifest.json`
 ///
 /// It scans all instance directories under `instances_dir` and reads each
-/// `config.json` to find the one whose `id` field matches the workload UID,
-/// then returns `shimProcessId` as the PID.
+/// `manifest.json` to find the one whose `id` field matches the workload UID,
+/// then returns `vmmProcessId` as the PID.
 ///
 /// Alternatively, if the workload UID directly maps to an instance directory name,
 /// it reads that directory's manifest directly.
@@ -70,7 +70,7 @@ impl ManifestPidFetcher {
             return Ok(manifest);
         }
 
-        // Strategy 2: Scan all subdirectories for a config.json containing matching id
+        // Strategy 2: Scan all subdirectories for a manifest.json containing matching id
         let mut entries = tokio::fs::read_dir(&self.instances_dir).await.map_err(|e| {
             std::io::Error::new(
                 e.kind(),
@@ -92,14 +92,14 @@ impl ManifestPidFetcher {
                 #[derive(serde::Deserialize)]
                 struct ManifestWithId {
                     id: Option<String>,
-                    #[serde(rename = "shimProcessId", alias = "shim_process_id")]
-                    shim_process_id: i32,
+                    #[serde(rename = "vmmProcessId", alias = "vmm_process_id")]
+                    vmm_process_id: i32,
                 }
 
                 if let Ok(m) = serde_json::from_str::<ManifestWithId>(&content) {
                     if m.id.as_deref() == Some(&uid_str) {
                         return Ok(Manifest {
-                            shim_process_id: m.shim_process_id,
+                            vmm_process_id: m.vmm_process_id,
                         });
                     }
                 }
@@ -121,12 +121,12 @@ impl PidClientTrait for ManifestPidFetcher {
     async fn fetch_pid(&self, uid: &WorkloadUid) -> Result<WorkloadPid, std::io::Error> {
         let manifest = self.read_manifest(uid).await?;
 
-        if manifest.shim_process_id <= 0 {
+        if manifest.vmm_process_id <= 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
-                    "Invalid shimProcessId {} for workload UID {}",
-                    manifest.shim_process_id,
+                    "Invalid vmmProcessId {} for workload UID {}",
+                    manifest.vmm_process_id,
                     uid.clone().into_string()
                 ),
             ));
@@ -134,11 +134,11 @@ impl PidClientTrait for ManifestPidFetcher {
 
         tracing::info!(
             "Fetched PID {} from manifest for workload UID {}",
-            manifest.shim_process_id,
+            manifest.vmm_process_id,
             uid.clone().into_string()
         );
 
-        Ok(WorkloadPid::new(manifest.shim_process_id))
+        Ok(WorkloadPid::new(manifest.vmm_process_id))
     }
 }
 

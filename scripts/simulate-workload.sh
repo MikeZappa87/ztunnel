@@ -4,7 +4,7 @@
 # Creates a network namespace via unshare, holds it open with sleep,
 # sets up a veth pair through a linux bridge so the workload netns
 # can communicate with the root namespace, then writes a manifest
-# config.json so ManifestPidFetcher can attest the PID.
+# manifest.json so ManifestPidFetcher can attest the PID.
 #
 # Usage:
 #   simulate-workload.sh <name> <namespace> <service_account> [instances_dir]
@@ -18,7 +18,7 @@
 #   3. Create a linux bridge (simwl-br0) in the root netns (if not exists)
 #   4. Create a veth pair, attach one end to the bridge, other to the workload netns
 #   5. Assign IP addresses and routes for connectivity
-#   6. Write {instances_dir}/{uid}/config.json with shimProcessId
+#   6. Write {instances_dir}/{uid}/manifest.json with shimProcessId
 #   7. Print the ZDS add and WDS add commands to run
 #
 # Networking:
@@ -39,9 +39,9 @@ INSTANCES_DIR="${4:-/instances}"
 # Find the next available IP on the bridge subnet by scanning existing workloads
 next_ip() {
     local used=()
-    # Collect IPs already assigned from existing config.json files
+    # Collect IPs already assigned from existing manifest.json files
     if [[ -d "$INSTANCES_DIR" ]]; then
-        for cfg in "$INSTANCES_DIR"/*/config.json; do
+        for cfg in "$INSTANCES_DIR"/*/manifest.json; do
             [[ -f "$cfg" ]] || continue
             local ip
             ip=$(grep -o '"ip": *"[^"]*"' "$cfg" 2>/dev/null | grep -o '[0-9.]*' || true)
@@ -72,10 +72,10 @@ next_ip() {
 cleanup() {
     local uid="$2"
     local dir="${3:-/instances}"
-    local cfgfile="$dir/$uid/config.json"
+    local cfgfile="$dir/$uid/manifest.json"
 
     if [[ ! -f "$cfgfile" ]]; then
-        echo "ERROR: No config.json found at $cfgfile"
+        echo "ERROR: No manifest.json found at $cfgfile"
         exit 1
     fi
 
@@ -98,7 +98,7 @@ cleanup() {
 
     # If no more workloads, remove the bridge
     local remaining
-    remaining=$(find "$dir" -name config.json 2>/dev/null | wc -l)
+    remaining=$(find "$dir" -name manifest.json 2>/dev/null | wc -l)
     if [[ "$remaining" -eq 0 ]] && ip link show "$BRIDGE_NAME" &>/dev/null; then
         echo "No more workloads, removing bridge $BRIDGE_NAME..."
         ip link set "$BRIDGE_NAME" down 2>/dev/null || true
@@ -239,11 +239,11 @@ else
 fi
 echo ""
 
-# Step 7: Create the manifest config.json
+# Step 7: Create the manifest.json
 MANIFEST_DIR="$INSTANCES_DIR/$UID_VAL"
 mkdir -p "$MANIFEST_DIR"
 
-cat > "$MANIFEST_DIR/config.json" <<EOF
+cat > "$MANIFEST_DIR/manifest.json" <<EOF
 {
     "id": "$UID_VAL",
     "name": "$NAME",
@@ -256,8 +256,8 @@ cat > "$MANIFEST_DIR/config.json" <<EOF
 }
 EOF
 
-echo "Wrote manifest: $MANIFEST_DIR/config.json"
-cat "$MANIFEST_DIR/config.json"
+echo "Wrote manifest: $MANIFEST_DIR/manifest.json"
+cat "$MANIFEST_DIR/manifest.json"
 echo ""
 
 # Step 8: Print the commands to enroll this workload

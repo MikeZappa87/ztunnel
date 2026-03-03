@@ -891,12 +891,24 @@ impl SecretManager {
                     },
                     _ => false,
                 };
+
+                // If the last fetch failed (Unavailable), trigger an immediate
+                // re-fetch so incoming connections don't have to wait for the
+                // backoff timer. The worker deduplicates concurrent Fetch
+                // requests, so this won't cause a thundering herd.
+                let unavailable = matches!(&*st.rx.borrow(), CertState::Unavailable(_));
                 drop(certs);
 
                 if expired {
                     tracing::warn!(
                         %id,
                         "start_fetch: cached certificate is expired — forcing immediate re-fetch"
+                    );
+                    self.post(Request::Fetch(id.clone(), Priority::RealTime)).await;
+                } else if unavailable {
+                    tracing::info!(
+                        %id,
+                        "start_fetch: certificate is unavailable — triggering immediate retry"
                     );
                     self.post(Request::Fetch(id.clone(), Priority::RealTime)).await;
                 } else if let Some(existing_pri) = init_pri(&rx)
@@ -922,12 +934,27 @@ impl SecretManager {
         &self,
         mut rx: watch::Receiver<CertState>,
     ) -> Result<Arc<tls::WorkloadCertificate>, Error> {
+        // Maximum time to wait for a cert to become available. If the cert is
+        // Unavailable (fetch failed), we wait for the worker to retry rather
+        // than failing immediately. This gives SPIRE entries time to propagate.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
         loop {
             tokio::select! {
                 // Wait for the initial value if not ready yet.
                 res = rx.changed() => match res {
                     Ok(()) => match *rx.borrow() {
-                        CertState::Unavailable(ref err) => return Err(err.to_owned()),
+                        CertState::Unavailable(ref err) => {
+                            // Instead of failing immediately, wait for the next retry
+                            // unless we've exceeded the deadline.
+                            if tokio::time::Instant::now() >= deadline {
+                                return Err(err.to_owned());
+                            }
+                            // start_fetch already posted a re-fetch request, so the
+                            // worker will retry soon. Loop to wait for the result.
+                            tracing::debug!("wait: cert unavailable, waiting for retry (deadline in {}s)",
+                                (deadline - tokio::time::Instant::now()).as_secs());
+                            continue;
+                        },
                         CertState::Available(ref certs) => return Ok(certs.to_owned()),
                         // Another call bumped up the priority, but still fetching the first
                         // certificate.

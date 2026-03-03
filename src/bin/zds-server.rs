@@ -27,7 +27,7 @@ use nix::sys::socket::{
     bind as nixbind, listen, socket as nix_socket,
 };
 use prost::Message;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{IoSlice, IoSliceMut};
 use std::net::{IpAddr, SocketAddr};
@@ -94,6 +94,9 @@ struct StoredWorkload {
     node: String,
     protocol: String,
 }
+
+/// Channel for pushing local WDS changes to upstream XDS aggregator
+type UpstreamPushTx = mpsc::Sender<WorkloadUpdate>;
 
 #[derive(Clone, Debug)]
 enum WorkloadUpdate {
@@ -695,10 +698,23 @@ impl XdsService {
 
 use ztunnel::xds::service::discovery::v3::aggregated_discovery_service_client::AggregatedDiscoveryServiceClient;
 
+/// A custom type_url used to push workload registrations from a downstream
+/// zds-server to the upstream XDS aggregator via the Delta ADS stream.
+const WORKLOAD_REGISTER_TYPE: &str = "istio.io/workloadRegister";
+const WORKLOAD_UNREGISTER_TYPE: &str = "istio.io/workloadUnregister";
+
 /// Connect to an upstream XDS server and pull workloads into the local store.
 /// This enables multi-cluster: remote workloads discovered upstream are merged
 /// into the local WorkloadStore and pushed to local ztunnel.
-async fn run_upstream_xds_client(upstream_url: String, store: WorkloadStore) -> Result<()> {
+///
+/// If `local_push_rx` is provided, local WDS changes are forwarded to the
+/// upstream aggregator so they become visible to all other clusters.
+async fn run_upstream_xds_client(
+    upstream_url: String,
+    store: WorkloadStore,
+    mut local_push_rx: mpsc::Receiver<WorkloadUpdate>,
+    local_uids: Arc<RwLock<HashSet<String>>>,
+) -> Result<()> {
     eprintln!("[Upstream XDS] Connecting to {}", upstream_url);
 
     let channel = tonic::transport::Endpoint::from_shared(upstream_url.clone())
@@ -727,6 +743,51 @@ async fn run_upstream_xds_client(upstream_url: String, store: WorkloadStore) -> 
     let mut stream = response.into_inner();
 
     eprintln!("[Upstream XDS] Connected, waiting for workloads...");
+
+    // Spawn a task to forward local WDS updates to the upstream via the request stream
+    let tx_for_push = tx.clone();
+    let local_uids_for_push = local_uids.clone();
+    tokio::spawn(async move {
+        while let Some(update) = local_push_rx.recv().await {
+            let req = match &update {
+                WorkloadUpdate::Add(workload) => {
+                    // Mark this UID as locally-originated to suppress echo-back
+                    local_uids_for_push.write().await.insert(workload.uid.clone());
+                    let xds = XdsService::workload_to_xds(workload);
+                    eprintln!(
+                        "[Upstream Push] Forwarding wds-add upstream: uid={}",
+                        workload.uid
+                    );
+                    DeltaDiscoveryRequest {
+                        type_url: WORKLOAD_REGISTER_TYPE.to_string(),
+                        resource_names_subscribe: vec![workload.uid.clone()],
+                        initial_resource_versions: std::collections::HashMap::from([(
+                            workload.uid.clone(),
+                            xds.encode_to_vec().iter().map(|b| format!("{:02x}", b)).collect::<String>(),
+                        )]),
+                        ..Default::default()
+                    }
+                }
+                WorkloadUpdate::Remove(uid) => {
+                    // Remove from local_uids so future remote adds are allowed
+                    local_uids_for_push.write().await.remove(uid.as_str());
+                    eprintln!(
+                        "[Upstream Push] Forwarding wds-del upstream: uid={}",
+                        uid
+                    );
+                    DeltaDiscoveryRequest {
+                        type_url: WORKLOAD_UNREGISTER_TYPE.to_string(),
+                        resource_names_unsubscribe: vec![uid.clone()],
+                        ..Default::default()
+                    }
+                }
+            };
+            if tx_for_push.send(req).await.is_err() {
+                eprintln!("[Upstream Push] Channel closed, stopping push forwarder");
+                break;
+            }
+        }
+    });
 
     while let Some(msg) = stream.message().await.context("Upstream stream error")? {
         eprintln!(
@@ -775,7 +836,12 @@ async fn run_upstream_xds_client(upstream_url: String, store: WorkloadStore) -> 
                                     "[Upstream XDS] Adding workload: uid={} name={} ns={} ips={:?}",
                                     stored.uid, stored.name, stored.namespace, stored.ips
                                 );
-                                store.add(stored).await;
+                                // Suppress echo-back: skip if this UID was locally originated
+                                if local_uids.read().await.contains(&stored.uid) {
+                                    eprintln!("[Upstream XDS] Skipping echo-back add for local uid={}", stored.uid);
+                                } else {
+                                    store.add(stored).await;
+                                }
                             }
                         }
                         Err(e) => {
@@ -788,8 +854,13 @@ async fn run_upstream_xds_client(upstream_url: String, store: WorkloadStore) -> 
 
         // Process removals
         for uid in &msg.removed_resources {
-            eprintln!("[Upstream XDS] Removing workload: uid={}", uid);
-            store.remove(uid).await;
+            // Suppress echo-back: skip if this UID was locally removed
+            if !local_uids.read().await.contains(uid) {
+                eprintln!("[Upstream XDS] Removing workload: uid={}", uid);
+                store.remove(uid).await;
+            } else {
+                eprintln!("[Upstream XDS] Skipping echo-back remove for local uid={}", uid);
+            }
         }
 
         // ACK the response
@@ -959,7 +1030,62 @@ impl AggregatedDiscoveryService for XdsService {
                         match msg {
                             Ok(Some(req)) => {
                                 eprintln!("[XDS] Received ACK/request: type_url={} nonce={}", req.type_url, req.response_nonce);
-                                
+
+                                // Handle workload registration pushes from downstream servers
+                                if req.type_url == WORKLOAD_REGISTER_TYPE {
+                                    for (uid, hex_data) in &req.initial_resource_versions {
+                                        let bytes: Vec<u8> = (0..hex_data.len())
+                                            .step_by(2)
+                                            .filter_map(|i| u8::from_str_radix(&hex_data[i..i+2], 16).ok())
+                                            .collect();
+                                        match XdsAddress::decode(bytes.as_slice()) {
+                                            Ok(addr) => {
+                                                if let Some(AddressType::Workload(wl)) = addr.r#type {
+                                                    let ips: Vec<IpAddr> = wl.addresses.iter().filter_map(|b| {
+                                                        match b.len() {
+                                                            4 => {
+                                                                let arr: [u8; 4] = b[..4].try_into().ok()?;
+                                                                Some(IpAddr::V4(std::net::Ipv4Addr::from(arr)))
+                                                            }
+                                                            16 => {
+                                                                let arr: [u8; 16] = b[..16].try_into().ok()?;
+                                                                Some(IpAddr::V6(std::net::Ipv6Addr::from(arr)))
+                                                            }
+                                                            _ => None,
+                                                        }
+                                                    }).collect();
+                                                    let protocol = match TunnelProtocol::try_from(wl.tunnel_protocol) {
+                                                        Ok(TunnelProtocol::Hbone) => "HBONE".to_string(),
+                                                        _ => "NONE".to_string(),
+                                                    };
+                                                    let stored = StoredWorkload {
+                                                        uid: wl.uid.clone(),
+                                                        name: wl.name.clone(),
+                                                        namespace: wl.namespace.clone(),
+                                                        service_account: wl.service_account.clone(),
+                                                        ips,
+                                                        node: wl.node.clone(),
+                                                        protocol,
+                                                    };
+                                                    eprintln!("[XDS] Registered workload from downstream: uid={} ips={:?}", stored.uid, stored.ips);
+                                                    store.add(stored).await;
+                                                }
+                                            }
+                                            Err(e) => {
+                                                eprintln!("[XDS] Failed to decode pushed workload {}: {}", uid, e);
+                                            }
+                                        }
+                                    }
+                                    continue;
+                                }
+                                if req.type_url == WORKLOAD_UNREGISTER_TYPE {
+                                    for uid in &req.resource_names_unsubscribe {
+                                        eprintln!("[XDS] Unregistered workload from downstream: uid={}", uid);
+                                        store.remove(uid).await;
+                                    }
+                                    continue;
+                                }
+
                                 // Handle late subscriptions (empty nonce = initial subscription)
                                 if req.response_nonce.is_empty() {
                                     if req.type_url == AUTHORIZATION_TYPE.to_string() && !sent_authorization {
@@ -1119,34 +1245,58 @@ async fn main() -> Result<()> {
     }
 
     // Start upstream XDS client (for multi-cluster relay)
-    if let Some(upstream_url) = args.upstream_xds {
+    // Create a push channel so local wds-add/wds-del can be forwarded upstream
+    let upstream_push_tx: Option<UpstreamPushTx> = if let Some(upstream_url) = args.upstream_xds {
+        let (push_tx, push_rx) = mpsc::channel::<WorkloadUpdate>(64);
         let store_for_upstream = workload_store.clone();
+        let local_uids: Arc<RwLock<HashSet<String>>> = Arc::new(RwLock::new(HashSet::new()));
         tokio::spawn(async move {
+            // The push_rx can only be consumed once, so we pass it into the first
+            // successful connection. On reconnect we lose buffered pushes, but
+            // the local store is still correct and a full resync would restore state.
+            let mut push_rx_opt = Some(push_rx);
             loop {
-                eprintln!("[Upstream XDS] Starting connection to {}...", upstream_url);
-                match run_upstream_xds_client(upstream_url.clone(), store_for_upstream.clone()).await {
+                eprintln!("[Upstream XDS] Connecting to {}...", upstream_url);
+                // Create a dummy receiver if we already consumed the real one
+                let rx = push_rx_opt.take().unwrap_or_else(|| {
+                    let (_tx, rx) = mpsc::channel::<WorkloadUpdate>(1);
+                    rx
+                });
+                match run_upstream_xds_client(
+                    upstream_url.clone(),
+                    store_for_upstream.clone(),
+                    rx,
+                    local_uids.clone(),
+                ).await {
                     Ok(()) => {
                         eprintln!("[Upstream XDS] Connection ended cleanly, reconnecting in 5s...");
                     }
                     Err(e) => {
-                        eprintln!("[Upstream XDS] Connection error: {}, reconnecting in 5s...", e);
+                        eprintln!("[Upstream XDS] Connection error: {}, retrying in 5s...", e);
                     }
                 }
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                // Clear local_uids on reconnect since state is unknown
+                local_uids.write().await.clear();
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             }
         });
-    }
+        Some(push_tx)
+    } else {
+        None
+    };
 
     // Spawn control socket handler
     let cmd_tx_clone = cmd_tx.clone();
     let store_clone = workload_store.clone();
+    let upstream_tx_clone = upstream_push_tx.clone();
     tokio::spawn(async move {
         loop {
             match control_listener.accept().await {
                 Ok((stream, _)) => {
                     let tx = cmd_tx_clone.clone();
                     let store = store_clone.clone();
-                    tokio::spawn(handle_control_client(stream, tx, store));
+                    let upstream_tx = upstream_tx_clone.clone();
+                    tokio::spawn(handle_control_client(stream, tx, store, upstream_tx));
                 }
                 Err(e) => {
                     eprintln!("[Control] Accept error: {}", e);
@@ -1294,6 +1444,7 @@ async fn handle_control_client(
     mut stream: tokio::net::UnixStream,
     cmd_tx: mpsc::Sender<ZdsCommand>,
     workload_store: WorkloadStore,
+    upstream_tx: Option<UpstreamPushTx>,
 ) {
     let (reader, mut writer) = stream.split();
     let mut reader = tokio::io::BufReader::new(reader);
@@ -1309,7 +1460,7 @@ async fn handle_control_client(
                 break;
             }
             Ok(_) => {
-                let response = handle_control_command(&line.trim(), &cmd_tx, &workload_store).await;
+                let response = handle_control_command(&line.trim(), &cmd_tx, &workload_store, &upstream_tx).await;
                 let _ = writer.write_all(format!("{}\n", response).as_bytes()).await;
             }
             Err(e) => {
@@ -1324,6 +1475,7 @@ async fn handle_control_command(
     line: &str,
     cmd_tx: &mpsc::Sender<ZdsCommand>,
     workload_store: &WorkloadStore,
+    upstream_tx: &Option<UpstreamPushTx>,
 ) -> String {
     let parts: Vec<&str> = line.split_whitespace().collect();
     if parts.is_empty() {
@@ -1352,17 +1504,32 @@ async fn handle_control_command(
                 node,
                 protocol,
             };
-            workload_store.add(workload).await;
+            workload_store.add(workload.clone()).await;
+            // Forward to upstream XDS aggregator if configured
+            if let Some(tx) = upstream_tx {
+                if let Err(e) = tx.send(WorkloadUpdate::Add(workload)).await {
+                    eprintln!("[Control] Failed to push wds-add upstream: {}", e);
+                }
+            }
             format!("OK: Added workload {}", parts[1])
         }
         "wds-del" => {
             if parts.len() != 2 {
                 return "ERROR: Usage: wds-del <uid>".to_string();
             }
-            if workload_store.remove(parts[1]).await {
+            let found = workload_store.remove(parts[1]).await;
+            // Always forward to upstream XDS aggregator if configured,
+            // even if the local store didn't have it (echo-back may have
+            // already removed the local copy).
+            if let Some(tx) = upstream_tx {
+                if let Err(e) = tx.send(WorkloadUpdate::Remove(parts[1].to_string())).await {
+                    eprintln!("[Control] Failed to push wds-del upstream: {}", e);
+                }
+            }
+            if found {
                 format!("OK: Removed workload {}", parts[1])
             } else {
-                format!("WARN: Workload {} not found", parts[1])
+                format!("OK: Removed workload {} (was not in local store)", parts[1])
             }
         }
         "wds-list" => {

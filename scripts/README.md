@@ -8,7 +8,7 @@ Simulate a non-Kubernetes workload for ztunnel mesh enrollment. This script crea
 2. Creates a **Linux bridge** (`simwl-br0` at `10.200.0.1/24`) in the root namespace (idempotent — reused across workloads)
 3. Creates a **veth pair** — host end attached to the bridge, peer end moved into the workload namespace and renamed to `eth0`
 4. **Assigns an IP** (`10.200.0.2`, `.3`, etc.) auto-incrementing, with a default route via the bridge
-5. Writes a **`config.json` manifest** that `ManifestPidFetcher` uses for SPIRE PID attestation
+5. Writes a **`manifest.json`** that `ManifestPidFetcher` uses for SPIRE PID attestation
 6. **Verifies connectivity** by pinging the bridge from inside the namespace
 
 ## Network Topology
@@ -107,7 +107,7 @@ Cleanup removes the veth pair, kills the sleep process, deletes the manifest dir
 
 ## Manifest File
 
-The script writes a `config.json` to `{instances_dir}/{uid}/config.json`:
+The script writes a `manifest.json` to `{instances_dir}/{uid}/manifest.json`:
 
 ```json
 {

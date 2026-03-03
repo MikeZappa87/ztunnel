@@ -112,7 +112,7 @@ If `k8s_psat` isn't available, generate a one-time join token:
 # Generate a token (valid for 1 hour)
 kubectl exec -n spire spire-server-0 -- /opt/spire/bin/spire-server token generate \
   -spiffeID spiffe://cluster.local/agent \
-  -ttl 3600
+  -ttl 36000
 ```
 
 This returns a token string. Pass it to the agent via its config:

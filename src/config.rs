@@ -344,7 +344,7 @@ pub struct Config {
     /// Source for PID fetching: "cri" (default) or "manifest"
     pub pid_source: String,
     /// Directory containing instance manifest.json files (used when pid_source="manifest")
-    /// Each instance has a subdirectory with a config.json containing shimProcessId.
+    /// Each instance has a subdirectory with a manifest.json containing shimProcessId.
     pub instances_dir: String,
 }
 
