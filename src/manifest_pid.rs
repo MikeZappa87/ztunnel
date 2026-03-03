@@ -58,8 +58,8 @@ impl ManifestPidFetcher {
     async fn read_manifest(&self, uid: &WorkloadUid) -> Result<Manifest, std::io::Error> {
         let uid_str = uid.clone().into_string();
 
-        // Strategy 1: Try direct path {instances_dir}/{uid}/config.json
-        let direct_path = self.instances_dir.join(&uid_str).join("config.json");
+        // Strategy 1: Try direct path {instances_dir}/{uid}/manifest.json
+        let direct_path = self.instances_dir.join(&uid_str).join("manifest.json");
         if let Ok(content) = tokio::fs::read_to_string(&direct_path).await {
             let manifest: Manifest = serde_json::from_str(&content).map_err(|e| {
                 std::io::Error::new(
@@ -86,7 +86,7 @@ impl ManifestPidFetcher {
             if !path.is_dir() {
                 continue;
             }
-            let manifest_path = path.join("config.json");
+            let manifest_path = path.join("manifest.json");
             if let Ok(content) = tokio::fs::read_to_string(&manifest_path).await {
                 // Check if this manifest's id matches our UID
                 #[derive(serde::Deserialize)]
@@ -162,7 +162,7 @@ mod tests {
             "shimProcessId": shim_pid,
             "bundle": format!("/instances/{}", instance_id),
         });
-        fs::write(dir.join("config.json"), manifest.to_string()).unwrap();
+        fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap();
         dir
     }
 
@@ -190,7 +190,7 @@ mod tests {
             "id": "my-workload-uid",
             "shimProcessId": 99,
         });
-        fs::write(dir.join("config.json"), manifest.to_string()).unwrap();
+        fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap();
 
         let fetcher = ManifestPidFetcher::new(tmp.path().to_string_lossy().to_string());
         let uid = WorkloadUid::new("my-workload-uid".to_string());
@@ -219,7 +219,7 @@ mod tests {
             "id": "bad-pid",
             "shimProcessId": 0,
         });
-        fs::write(dir.join("config.json"), manifest.to_string()).unwrap();
+        fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap();
 
         let fetcher = ManifestPidFetcher::new(tmp.path().to_string_lossy().to_string());
         let uid = WorkloadUid::new("bad-pid".to_string());
