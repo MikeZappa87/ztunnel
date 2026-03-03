@@ -297,7 +297,7 @@ pub enum Priority {
 // Arguably this type is overloaded - it's used both for internal bookkeeping and reporting state
 // to /config_dump (collect_certs). It may be the case we'll wont to fork off a similar copy in the
 // future.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum CertState {
     // Should happen only on the first request for an Identity.
     Initializing(Priority),
@@ -325,7 +325,7 @@ struct CertChannel {
     tx: watch::Sender<CertState>,
 }
 
-#[derive(Eq, PartialEq)]
+#[derive(Eq, PartialEq, Debug)]
 struct PendingPriority(Priority, Instant);
 
 impl Ord for PendingPriority {
@@ -347,12 +347,6 @@ impl PartialOrd for PendingPriority {
 // Implements the actual logic behind SecretManager.
 struct Worker {
     client: Box<dyn CaClientTrait<Key = RequestKey>>,
-    // For now, certificates contain SystemTime so we need to convert it to Instant. Using Converter
-    // allows us to work on Instants without referring to the current SystemTime, which allows for
-    // time control in unit tests.
-    //
-    // TODO: Change tls::Certs to use Instant instead of SystemTime.
-    time_conv: crate::time::Converter,
     // Maps Identity to the certificate state.
     certs: Mutex<HashMap<CompositeId<RequestKey>, CertChannel>>,
     // How many concurrent fetch_certificate calls can be pending at a time.
@@ -370,7 +364,6 @@ impl Worker {
         }
         let worker = Arc::new(Self {
             client,
-            time_conv: cfg.time_conv,
             concurrency: cfg.concurrency,
             certs: Default::default(),
         });
@@ -420,9 +413,41 @@ impl Worker {
         let mut pending_backoffs_by_id: HashMap<CompositeId<RequestKey>, ExponentialBackoff> =
             HashMap::new();
 
+        // Periodic heartbeat to detect if the worker loop is alive during long gaps
+        let mut heartbeat = tokio::time::interval(Duration::from_secs(120));
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let loop_start = Instant::now();
+
         'main: loop {
             let next = pending.peek().map(|(_, PendingPriority(_, ts))| *ts);
+            let next_in = next.map(|t| {
+                let now = Instant::now();
+                if t > now { t.duration_since(now) } else { Duration::ZERO }
+            });
+            tracing::debug!(
+                pending_len = pending.len(),
+                fetches_len = fetches.len(),
+                processing_len = processing.len(),
+                next_timer_in_secs = next_in.map(|d| d.as_secs()),
+                "worker loop iteration"
+            );
             tokio::select! {
+                // Periodic heartbeat — logs state every 2 minutes to detect silent stalls
+                _ = heartbeat.tick() => {
+                    let next_dbg = next.map(|t| {
+                        let now = Instant::now();
+                        if t > now { format!("+{}s", t.duration_since(now).as_secs()) } else { format!("-{}s ago", now.duration_since(t).as_secs()) }
+                    });
+                    tracing::info!(
+                        pending_len = pending.len(),
+                        fetches_len = fetches.len(),
+                        processing_len = processing.len(),
+                        next_timer = ?next_dbg,
+                        uptime_secs = loop_start.elapsed().as_secs(),
+                        "worker heartbeat"
+                    );
+                    continue 'main;
+                },
                 // Handle requests from SecretManager. Those are generally split between the
                 // client-side processing (operations on the `certs` map) and the worker-side
                 // processing (receiving the relevant request and taking action on it). The order
@@ -439,12 +464,15 @@ impl Worker {
                 // the worker.
                 res = requests.recv() => match res {
                     Some(Request::Fetch(id, pri)) => {
+                        tracing::debug!(%id, ?pri, "worker: received Request::Fetch");
                         if !self.has_id(&id).await {
+                            tracing::debug!(%id, "worker: Request::Fetch ignored — id not in certs map");
                             // Nobody interested in the Identity anymore, do nothing.
                             continue 'main;
                         }
                         match processing.get(&id) {
                             None => {
+                                tracing::debug!(%id, ?pri, "worker: Request::Fetch — pushing to pending");
                                 push_increase(&mut pending, id, PendingPriority(pri, Instant::now()));
                             },
                             Some(Fetch::Forgetting) => {
@@ -477,10 +505,15 @@ impl Worker {
 
                 // Handle fetch results.
                 Some((id, res)) = fetches.next() => {
-                    tracing::trace!(%id, "fetch complete");
+                    let res: Result<tls::WorkloadCertificate, Error> = res;
+                    let fetch_ok = res.is_ok();
+                    tracing::debug!(%id, success = fetch_ok, "worker: fetch complete");
                     match processing.remove(&id) {
                         Some(Fetch::Processing) => (),
-                        Some(Fetch::Forgetting) => continue 'main,
+                        Some(Fetch::Forgetting) => {
+                            tracing::debug!(%id, "worker: fetch complete but state is Forgetting — dropping result");
+                            continue 'main;
+                        },
                         None => unreachable!("processing should represent all fetches"),
                     }
                     let (state, refresh_at) = match res {
@@ -550,30 +583,77 @@ impl Worker {
                             // Reset (pop and drop) the backoff on success.
                             pending_backoffs_by_id.remove(&id);
                             let certs: tls::WorkloadCertificate = certs; // Type annotation.
-                            let refresh_at = self.time_conv.system_time_to_instant(certs.refresh_at());
-                            let refresh_at = if let Some(t) = refresh_at {
-                                t.into()
+                            let refresh_at_sys = certs.refresh_at();
+                            // Use a FRESH Converter to map SystemTime → Instant.
+                            // The Worker's startup Converter becomes permanently skewed
+                            // after system suspend because CLOCK_MONOTONIC pauses while
+                            // SystemTime (wall clock) advances. A fresh Converter captures
+                            // current std::time::Instant and SystemTime as a synchronized
+                            // baseline, giving correct results in both production and
+                            // paused tokio tests.
+                            let fresh_conv = crate::time::Converter::new();
+                            let refresh_at = if let Some(t) = fresh_conv.system_time_to_instant(refresh_at_sys) {
+                                let tokio_instant: Instant = t.into();
+                                let now = Instant::now();
+                                let delta_secs = if tokio_instant > now {
+                                    tokio_instant.duration_since(now).as_secs() as i64
+                                } else {
+                                    -(now.duration_since(tokio_instant).as_secs() as i64)
+                                };
+                                tracing::info!(
+                                    %id,
+                                    refresh_in_secs = delta_secs,
+                                    "worker: cert fetch OK — scheduling refresh"
+                                );
+                                tokio_instant
                             } else {
                                 // Malformed certificate (not_after is way too much into the
                                 // past or the future). Queue another refresh soon.
-                                //
-                                // TODO: This is a bit inconsistent since we still return the
-                                // certificate to the caller successfully. Basically the
-                                // behavior is silly, but simple and avoid panics in time math.
-                                // We'll try to get rid of the SystemTime <-> Instant
-                                // conversion here, so for now leaving the code as is.
+                                tracing::warn!(%id, "worker: refresh_at conversion returned None — using Instant::now()");
                                 Instant::now()
                             };
                             (CertState::Available(Arc::new(certs)), refresh_at)
                         },
                     };
-                    if self.update_certs(&id, state).await {
+                    if self.update_certs(&id, state.clone()).await {
+                        tracing::debug!(
+                            %id,
+                            pending_len_before = pending.len(),
+                            "worker: update_certs OK — push_increase for refresh"
+                        );
                         push_increase(&mut pending, id, PendingPriority(Priority::Background, refresh_at));
+                        tracing::debug!(
+                            pending_len_after = pending.len(),
+                            "worker: push_increase done"
+                        );
+                    } else if self.has_id(&id).await {
+                        // The identity was removed (forget_certificate) and then re-added
+                        // (fetch_certificate_pri) while this fetch was in flight. The certs map
+                        // has a NEW entry for this id. Push the fetched cert into the new entry
+                        // and reschedule the refresh so rotation doesn't silently die.
+                        tracing::warn!(
+                            %id,
+                            "identity was re-added after removal — recovering certificate rotation"
+                        );
+                        if self.update_certs(&id, state).await {
+                            push_increase(&mut pending, id, PendingPriority(Priority::Background, refresh_at));
+                        }
+                    } else {
+                        tracing::error!(
+                            %id,
+                            "worker: update_certs returned false AND has_id is false — rotation DEAD for this identity"
+                        );
                     }
                 },
                 // Initiate the next fetch.
                 true = maybe_sleep_until(next), if fetches.len() < self.concurrency as usize => {
-                    let (id, _) = pending.pop().expect("pending should always have an element at this point");
+                    let (id, pri) = pending.pop().expect("pending should always have an element at this point");
+                    tracing::debug!(
+                        %id,
+                        ?pri,
+                        pending_remaining = pending.len(),
+                        "worker: timer fired — popped from pending, starting fetch"
+                    );
                     processing.insert(id.to_owned(), Fetch::Processing);
                     fetches.push(async move {
                         let res = self.client.fetch_certificate(&id).await;
@@ -597,7 +677,15 @@ impl Worker {
                 state.tx.send(certs).expect("state.rx cannot be gone");
                 true
             }
-            None => false,
+            None => {
+                tracing::warn!(
+                    %id,
+                    "update_certs: identity not found in certs map — \
+                     certificate rotation will stop for this identity. \
+                     This means forget_certificate was called (workload removed via xDS/ZDS)"
+                );
+                false
+            },
         }
     }
 
@@ -609,22 +697,22 @@ impl Worker {
         if let Some(cert_channel) = self.certs.lock().await.get(id) {
             match &*cert_channel.rx.borrow() {
                 CertState::Available(cert) => {
-                    let now = self
-                        .time_conv
-                        .instant_to_system_time(std::time::Instant::now());
-                    if let Some(now) = now {
-                        let cert_expiry = cert.cert.expiration().not_after;
+                    // Use fresh wall clock for the expiry check (correct after
+                    // suspend), and a fresh Converter for the Instant mapping.
+                    let now_sys = std::time::SystemTime::now();
+                    let cert_expiry = cert.cert.expiration().not_after;
 
-                        if now < cert_expiry {
-                            if let Some(expiry_instant) =
-                                self.time_conv.system_time_to_instant(cert_expiry)
-                            {
-                                tracing::debug!(%id, "existing certificate valid until {:?}", cert_expiry);
-                                return Some((cert.clone(), expiry_instant.into()));
-                            }
-                        } else {
-                            tracing::debug!(%id, "existing certificate expired at {:?}", cert_expiry);
+                    if now_sys < cert_expiry {
+                        let fresh_conv = crate::time::Converter::new();
+                        if let Some(expiry_instant) =
+                            fresh_conv.system_time_to_instant(cert_expiry)
+                        {
+                            let tokio_instant: Instant = expiry_instant.into();
+                            tracing::debug!(%id, "existing certificate valid until {:?}", cert_expiry);
+                            return Some((cert.clone(), tokio_instant));
                         }
+                    } else {
+                        tracing::debug!(%id, "existing certificate expired at {:?}", cert_expiry);
                     }
                 }
                 _ => {
@@ -654,6 +742,11 @@ pub enum Request {
 }
 
 pub struct SecretManagerConfig {
+    // Still needed for MockCaClient in tests (cert generation uses the Converter
+    // to map tokio virtual Instant → SystemTime). The Worker itself no longer
+    // uses this — it creates fresh Converters on each cert fetch to handle
+    // system suspend correctly.
+    #[allow(dead_code)]
     time_conv: crate::time::Converter,
     concurrency: u16,
 }
@@ -786,9 +879,27 @@ impl SecretManager {
             // Identity found in cache and is already being refreshed. Bump the priority if needed.
             Some(st) => {
                 let rx = st.rx.clone();
+
+                // Defensive check: if the cached cert is expired, force an
+                // immediate re-fetch. This catches cases where the refresh
+                // timer was skewed (e.g. by system suspend) and the cert
+                // expired before the timer fired.
+                let expired = match &*st.rx.borrow() {
+                    CertState::Available(cert) => {
+                        let not_after = cert.cert.expiration().not_after;
+                        std::time::SystemTime::now() >= not_after
+                    },
+                    _ => false,
+                };
                 drop(certs);
 
-                if let Some(existing_pri) = init_pri(&rx)
+                if expired {
+                    tracing::warn!(
+                        %id,
+                        "start_fetch: cached certificate is expired — forcing immediate re-fetch"
+                    );
+                    self.post(Request::Fetch(id.clone(), Priority::RealTime)).await;
+                } else if let Some(existing_pri) = init_pri(&rx)
                     && pri > existing_pri
                 {
                     self.post(Request::Fetch(id.clone(), pri)).await;
@@ -854,6 +965,11 @@ impl SecretManager {
         // TODO: consider keeping the cert around for a minute or so to avoid churn
         // We would ideally drop any pending or new requests to rotate.
         if self.worker.certs.lock().await.remove(id).is_some() {
+            tracing::warn!(
+                %id,
+                "forget_certificate: removing identity from certs map — \
+                 rotation will stop until workload is re-added"
+            );
             self.post(Request::Forget(id.clone())).await;
         }
     }
@@ -1452,5 +1568,77 @@ mod tests {
         assert_matches!(Identity::from_str("spiffe://td/ns/ns/sa"), Err(_));
         assert_matches!(Identity::from_str("spiffe://td/ns/ns/sa/sa/"), Err(_));
         assert_matches!(Identity::from_str("spiffe://td/ns/ns/foobar/sa/"), Err(_));
+    }
+
+    // Verifies that forgetting an identity and immediately re-adding it while a background
+    // cert refresh is in-flight does not kill the rotation cycle. The fix in the worker loop
+    // handles the case where update_certs returns false (entry was removed) but has_id returns
+    // true (entry was re-added concurrently).
+    //
+    // Note: The exact narrow race window (update_certs returns false, then has_id returns true
+    // due to a concurrent re-insert between two sequential lock acquisitions within the worker
+    // task) requires multi-threaded preemption and cannot be triggered deterministically in a
+    // single-threaded paused-time test. This test validates the broader behavioral contract:
+    // forget + re-add during in-flight fetch → rotation must continue.
+    #[tokio::test(start_paused = true)]
+    async fn test_forget_readd_rotation_continues() {
+        let test = setup(1);
+        let id = identity("test");
+
+        // Step 1: Fetch initial certificate. CaClient has 1s latency, so this completes at ~t=1s.
+        let cert1 = test
+            .secret_manager
+            .fetch_certificate(&id.to_composite_id())
+            .await
+            .unwrap();
+
+        // Step 2: Advance time to just after the halflife so the background refresh timer fires
+        // and the worker starts a new CaClient fetch (which will take another 1s).
+        // Cert was issued at ~t=1s, refresh_at = t=1s + CERT_HALFLIFE = t=51s.
+        // Sleep to t≈51s+1ms to ensure the timer fires and the fetch starts.
+        tokio::time::sleep(CERT_HALFLIFE + MILLISEC).await;
+
+        // Step 3: While the background fetch is in-flight, forget and immediately re-add.
+        test.secret_manager
+            .forget_certificate(&id.to_composite_id())
+            .await;
+        assert_eq!(test.secret_manager.cache_len().await, 0);
+
+        // Re-add: this inserts a new entry and triggers a new fetch request.
+        let cert2 = test
+            .secret_manager
+            .fetch_certificate(&id.to_composite_id())
+            .await
+            .unwrap();
+        assert_eq!(test.secret_manager.cache_len().await, 1);
+
+        // The re-fetched cert should be different from the original.
+        assert_ne!(
+            cert1.cert.serial(),
+            cert2.cert.serial(),
+            "re-fetch after forget should produce a new certificate"
+        );
+
+        // Step 4: Wait for the next background rotation cycle. cert2 was issued at the current
+        // time, so its refresh_at is ~current_time + CERT_HALFLIFE. Wait that plus the CaClient
+        // fetch latency plus a buffer. The buffer is larger than MILLISEC because the fresh
+        // Converter used for mapping SystemTime→Instant may introduce µs-level jitter between
+        // CLOCK_MONOTONIC and CLOCK_REALTIME captures, which can shift the refresh timer
+        // by up to ~1ms.
+        tokio::time::sleep(CERT_HALFLIFE + SEC + Duration::from_millis(100)).await;
+
+        // Step 5: Verify rotation continued — the cached cert should have been refreshed.
+        let cert3 = test
+            .secret_manager
+            .fetch_certificate(&id.to_composite_id())
+            .await
+            .unwrap();
+        assert_ne!(
+            cert2.cert.serial(),
+            cert3.cert.serial(),
+            "background rotation should continue after forget + re-add"
+        );
+
+        test.tear_down().await;
     }
 }

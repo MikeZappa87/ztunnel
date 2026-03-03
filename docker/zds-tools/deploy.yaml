@@ -72,18 +72,40 @@ spec:
           type: DirectoryOrCreate
 ---
 # A standalone client pod for running commands
-apiVersion: v1
-kind: Pod
+# A standalone client daemonset for running commands
+apiVersion: apps/v1
+kind: DaemonSet
 metadata:
   name: zds-client
-  namespace: zds-tools
+  namespace: agentfabric-system
   labels:
     app: zds-client
 spec:
-  serviceAccountName: zds-server
-  containers:
-  - name: zds-client
-    image: zds-tools:local
-    imagePullPolicy: Never
-    command: ["/bin/sh", "-c", "sleep infinity"]
-  restartPolicy: Never
+  selector:
+    matchLabels:
+      app: zds-client
+  template:
+    metadata:
+      labels:
+        app: zds-client
+    spec:
+      serviceAccountName: zds-server
+      containers:
+      - name: zds-client
+        image: acndev.azurecr.io/mzappa/xds:vx100-dev
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/sh", "-c", "sleep infinity"]
+        volumeMounts:
+        - name: ztunnel-socket
+          mountPath: /var/run/ztunnel
+        - name: run-netns
+          mountPath: /run/netns
+          mountPropagation: HostToContainer
+      volumes:
+      - name: ztunnel-socket
+        hostPath:
+          path: /var/run/ztunnel
+      - name: run-netns
+        hostPath:
+          path: /run/netns
+          type: DirectoryOrCreate

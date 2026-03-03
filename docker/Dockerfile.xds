@@ -1,0 +1,21 @@
+FROM rust:1.90-bookworm AS builder
+
+RUN apt-get update && apt-get install -y cmake clang pkg-config libssl-dev protobuf-compiler && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . .
+
+# Remove cross-compilation linker config (building natively in-container)
+RUN sed -i '/\[target\.x86_64/,+1d' .cargo/config.toml
+
+RUN cargo build --release --bin zds-server --bin zds-client && \
+    cp out/rust/release/zds-server /zds-server && \
+    cp out/rust/release/zds-client /zds-client
+
+FROM ubuntu:24.04
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates iptables iproute2 && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /zds-server /usr/local/bin/
+COPY --from=builder /zds-client /usr/local/bin/
+COPY --from=builder /build/docker/zds-tools/ztunnel-redirect-workload.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/zds-client /usr/local/bin/zds-server /usr/local/bin/ztunnel-redirect-workload.sh
+ENTRYPOINT ["/usr/local/bin/zds-server"]

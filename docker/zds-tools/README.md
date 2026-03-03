@@ -107,15 +107,20 @@ NODE_POD=$(kubectl -n zds-tools get pods -l app=zds-server \
 POD_UID=$(kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.metadata.uid}')
 POD_IP=$(kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.status.podIP}')
 
-# Find the network namespace (CNI-created)
-NETNS=$(kubectl exec -n zds-tools $NODE_POD -- ls /run/netns/ | grep <partial-uid>)
+# Find the network namespace by IP (CNI netns names are random UUIDs)
+NODE=<docker-node-name>  # e.g., ztunnel-test-worker
+NETNS=$(docker exec $NODE sh -c '
+  for ns in /var/run/netns/cni-*; do
+    ip=$(nsenter --net=$ns ip -4 addr show eth0 2>/dev/null | grep -o "inet [0-9.]*" | cut -d" " -f2)
+    [ "$ip" = "'"$POD_IP"'" ] && basename $ns && break
+  done')
 ```
 
 Send the ZDS add command:
 ```bash
 kubectl exec -n zds-tools $NODE_POD -- \
   zds-client send --control-socket /var/run/ztunnel/control.sock \
-  "add $POD_UID <name> <namespace> <sa> /run/netns/$NETNS"
+  add $POD_UID <name> <namespace> <sa> /run/netns/$NETNS
 ```
 
 This tells ztunnel to proxy traffic in the workload's netns and automatically installs iptables redirect rules.
@@ -125,7 +130,7 @@ This tells ztunnel to proxy traffic in the workload's netns and automatically in
 ```bash
 kubectl exec -n zds-tools deploy/xds-aggregator -- \
   zds-client send --control-socket /tmp/control.sock \
-  "wds-add $POD_UID <name> <namespace> <sa> $POD_IP HBONE <node>"
+  wds-add $POD_UID <name> <namespace> <sa> $POD_IP HBONE <node>
 ```
 
 > **Important:** Use `HBONE` as the protocol to enable mTLS. Using `TCP` results in plaintext passthrough.
@@ -140,12 +145,12 @@ See [docker/spire/README.md](../spire/README.md) for SPIRE registration entry co
 # Remove from ZDS (also removes iptables rules)
 kubectl exec -n zds-tools $NODE_POD -- \
   zds-client send --control-socket /var/run/ztunnel/control.sock \
-  "del $POD_UID"
+  del $POD_UID
 
 # Remove from WDS
 kubectl exec -n zds-tools deploy/xds-aggregator -- \
   zds-client send --control-socket /tmp/control.sock \
-  "wds-del $POD_UID"
+  wds-del $POD_UID
 ```
 
 ## iptables Redirect Rules

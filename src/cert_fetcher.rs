@@ -127,6 +127,13 @@ impl CertFetcher for CertFetcherImpl {
 
     fn clear_cert(&self, w: &Workload) {
         let key = self.build_key(w);
+        tracing::warn!(
+            identity = %key,
+            workload = %w.name,
+            node = %w.node,
+            "clear_cert: removing certificate for workload \
+             (last identity on node removed via xDS/ZDS)"
+        );
 
         if let Err(e) = self.tx.try_send(Request::Forget(key)) {
             info!("couldn't clear identity: {:?}", e)

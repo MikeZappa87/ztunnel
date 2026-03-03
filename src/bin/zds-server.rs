@@ -1396,12 +1396,19 @@ async fn handle_control_command(
                 return "ERROR: Usage: add <uid> <name> <namespace> <service_account> <netns_path>".to_string();
             }
             let (tx, rx) = oneshot::channel();
+            let netns_input = parts[5];
+            // If the user provided a bare name (no path separator), prepend /var/run/netns/
+            let netns_path = if netns_input.contains('/') {
+                PathBuf::from(netns_input)
+            } else {
+                PathBuf::from(format!("/var/run/netns/{}", netns_input))
+            };
             let cmd = ZdsCommand::Add {
                 uid: parts[1].to_string(),
                 name: parts[2].to_string(),
                 namespace: parts[3].to_string(),
                 service_account: parts[4].to_string(),
-                netns_path: PathBuf::from(parts[5]),
+                netns_path,
                 response: tx,
             };
             if cmd_tx.send(cmd).await.is_err() {

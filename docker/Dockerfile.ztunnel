@@ -1,0 +1,17 @@
+FROM rust:1.90-bookworm AS builder
+
+RUN apt-get update && apt-get install -y cmake clang pkg-config libssl-dev protobuf-compiler && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . .
+
+# Remove cross-compilation linker config (building natively in-container)
+RUN sed -i '/\[target\.x86_64/,+1d' .cargo/config.toml
+
+RUN cargo build --release && \
+    cp out/rust/release/ztunnel /ztunnel
+
+FROM ubuntu:24.04
+RUN apt-get update && apt-get install -y ca-certificates iptables && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /ztunnel /usr/local/bin/ztunnel
+ENTRYPOINT ["/usr/local/bin/ztunnel"]

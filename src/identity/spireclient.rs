@@ -20,7 +20,8 @@ use crate::{
 };
 use spiffe::{TrustDomain, X509Svid};
 use spire_api::{DelegateAttestationRequest, DelegatedIdentityClient};
-use std::{str::FromStr, sync::Arc};
+use std::str::FromStr;
+use std::sync::Arc;
 use tokio_stream::{Stream, StreamExt};
 use tonic::async_trait;
 
@@ -69,14 +70,18 @@ impl DelegatedIdentityApi for DelegatedIdentityClient {
 }
 
 /// SPIRE client that fetches X.509 certificates for workload identities using
-/// Kubernetes selectors (namespace + service account) rather than PIDs.
-/// This approach works in environments where PID-based attestation is not feasible.
+/// the Delegated Identity API with PID-based attestation.
+///
+/// Each call to `fetch_certificate` opens a `SubscribeToX509SVIDs` stream,
+/// reads the initial SVID, verifies the PID hasn't changed, and returns the
+/// certificate. The identity manager's timer-based rotation (`refresh_at` at
+/// 50% of cert lifetime) calls `fetch_certificate` again to get a fresh cert.
 pub struct SpireClient<C: DelegatedIdentityApi> {
     /// gRPC client for communicating with the SPIRE Delegated Identity API
     client: C,
     /// SPIFFE trust domain (e.g., "cluster.local") used for certificate validation
     trust_domain: String,
-    /// Optional PID client for workload PID verification
+    /// PID client for workload PID verification
     pid: Box<dyn PidClientTrait>,
     /// Shared configuration for SPIRE client behavior
     cfg: Arc<Config>,
@@ -105,18 +110,7 @@ impl<C: DelegatedIdentityApi> SpireClient<C> {
     }
 
     /// Fetches a workload certificate using container pid.
-    /// This method implements a streaming approach to handle SPIRE's async certificate delivery.
-    ///
-    /// # Arguments
-    /// * `pid` - The container process ID for the workload
-    /// * `wl_uid` - The unique identifier for the workload
-    ///
-    /// # Returns
-    /// A WorkloadCertificate containing the X.509 certificate and private key
-    ///
-    /// # Errors
-    /// Returns error if stream setup fails, no certificates are received within timeout,
-    /// or certificate construction fails.
+    /// Opens a SPIRE stream, reads the first SVID, and verifies PID consistency.
     async fn get_cert_by_pid(
         &self,
         pid: i32,
@@ -124,19 +118,28 @@ impl<C: DelegatedIdentityApi> SpireClient<C> {
     ) -> Result<tls::WorkloadCertificate, Error> {
         let certs = self
             .get_cert_from_spire(DelegateAttestationRequest::Pid(pid), id.clone())
-            .await;
-
-        let certs = match certs {
-            Err(e) => {
-                return Err(Error::FailedToFetchCertificate(format!(
+            .await
+            .map_err(|e| {
+                Error::FailedToFetchCertificate(format!(
                     "Failed to fetch certificate for PID {}: {}",
                     pid, e
-                )));
-            }
-            Ok(certs) => certs,
-        };
+                ))
+            })?;
 
-        // Verify that the PID we used for attestation matches the PID associated with the workload UID
+        // Log cert validity details for rotation debugging
+        let expiration = certs.cert.expiration();
+        let refresh = certs.refresh_at();
+        tracing::info!(
+            uid = id.key().clone().into_string(),
+            identity = %id.id(),
+            not_before = ?expiration.not_before,
+            not_after = ?expiration.not_after,
+            refresh_at = ?refresh,
+            pid = pid,
+            "SPIRE certificate fetched"
+        );
+
+        // Verify that the PID we used for attestation still matches the workload UID
         let pid_verify = self.pid.fetch_pid(id.key()).await;
 
         match pid_verify {
@@ -160,16 +163,6 @@ impl<C: DelegatedIdentityApi> SpireClient<C> {
     }
 
     /// Fetches a workload certificate using workload UID to determine PID.
-    /// This method implements a streaming approach to handle SPIRE's async certificate delivery.
-    /// # Arguments
-    /// * `wl_uid` - The unique identifier for the workload
-    ///
-    /// # Returns
-    /// A WorkloadCertificate containing the X.509 certificate and private key
-    ///
-    /// # Errors
-    /// Returns error if PID client is not configured, stream setup fails,
-    /// no certificates are received within timeout, or certificate construction fails.
     async fn get_cert_by_workload_uid(
         &self,
         id: &CompositeId<WorkloadUid>,
@@ -204,52 +197,46 @@ impl<C: DelegatedIdentityApi> SpireClient<C> {
         &self,
         value: DelegateAttestationRequest,
     ) -> Result<X509Svid, Error> {
-        // Initiate streaming request to SPIRE server using Kubernetes selectors
-        // clone() is cheap here as DelegatedIdentityClient uses Arc internally
-        let stream = self.client.get_x509_svids(value).await.map_err(|e| {
-            Error::FailedToFetchCertificate(format!("Failed to stream X.509 SVIDs: {e}"))
-        })?;
-        // Set reasonable timeout to prevent indefinite blocking on unresponsive SPIRE servers
         let time_out = self.cfg.spire_timeout;
 
-        // Process the stream with timeout protection
-        // SPIRE may deliver multiple responses, but we only need the first successful one
-        tokio::pin!(stream);
+        // Wrap both stream establishment AND reading in a single timeout.
+        // The gRPC stream_x509_svids call can hang indefinitely if the SPIRE
+        // agent's socket accepts the connection but never responds (e.g., during
+        // a prolonged restart). Without this, a hung connection blocks the
+        // identity manager's fetch slot and prevents cert rotation.
         let sf = tokio::time::timeout(time_out, async {
+            let stream = self.client.get_x509_svids(value).await.map_err(|e| {
+                Error::FailedToFetchCertificate(format!("Failed to stream X.509 SVIDs: {e}"))
+            })?;
+
+            // SPIRE may deliver multiple responses, but we only need the first successful one
+            tokio::pin!(stream);
             while let Some(svid_response) = stream.next().await {
                 match svid_response {
                     Ok(response) => {
-                        // Successfully received a certificate - return immediately
                         return Ok(response);
                     }
                     Err(e) => {
-                        // Log stream errors but continue waiting for subsequent responses
-                        // Some responses may fail while others succeed
                         tracing::warn!("Error receiving SVID response: {}", e);
                     }
                 }
             }
-            // Stream ended without delivering any successful responses
             Err(Error::FailedToFetchCertificate(
                 "No SVIDs received in stream".to_string(),
             ))
         })
         .await;
 
-        // Handle nested Result types from timeout + stream operations
-        let svid_response = match sf {
-            Ok(Ok(response)) => response, // Successfully got certificate within timeout
-            Ok(Err(e)) => return Err(e),
+        match sf {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(e)) => Err(e),
             Err(_) => {
-                // Timeout expired before receiving any certificates
-                tracing::error!("Timeout while waiting for SVID stream");
-                return Err(Error::FailedToFetchCertificate(
+                tracing::error!("Timeout while waiting for SPIRE SVID (stream establishment or reading took longer than {:?})", time_out);
+                Err(Error::FailedToFetchCertificate(
                     "Timeout while waiting for SVID stream".to_string(),
-                ));
+                ))
             }
-        };
-
-        Ok(svid_response)
+        }
     }
 
     /// Fetches a workload certificate from SPIRE using the provided attestation request.
@@ -276,7 +263,7 @@ impl<C: DelegatedIdentityApi> SpireClient<C> {
 
         // Construct the final WorkloadCertificate combining SVID and trust bundle
         let certs = tls::WorkloadCertificate::new_svid(&svid_response, &bundle)?;
-
+/* 
         let id_strg = format!(
             "spiffe://{}{}",
             svid_response.spiffe_id().trust_domain(),
@@ -291,7 +278,7 @@ impl<C: DelegatedIdentityApi> SpireClient<C> {
                 id_strg
             )));
         }
-
+*/
         Ok(certs)
     }
 
