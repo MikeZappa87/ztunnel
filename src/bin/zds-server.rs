@@ -23,8 +23,8 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use nix::sys::socket::{
-    self, AddressFamily, MsgFlags, SockFlag, SockType, UnixAddr,
-    bind as nixbind, listen, socket as nix_socket,
+    self, AddressFamily, MsgFlags, SockFlag, SockType, UnixAddr, bind as nixbind, listen,
+    socket as nix_socket,
 };
 use prost::Message;
 use std::collections::{HashMap, HashSet};
@@ -36,26 +36,27 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Command;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot, RwLock, broadcast};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::sync::{RwLock, broadcast, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use ztunnel::inpod::istio::zds::{
-    Ack, AddWorkload, DelWorkload, KeepWorkload, SnapshotSent, WorkloadInfo, 
-    WorkloadRequest, WorkloadResponse, ZdsHello,
-    workload_request::Payload,
+    Ack, AddWorkload, DelWorkload, KeepWorkload, SnapshotSent, WorkloadInfo, WorkloadRequest,
+    WorkloadResponse, ZdsHello, workload_request::Payload,
     workload_response::Payload as ResponsePayload,
 };
 
 // XDS types
+use ztunnel::xds::istio::workload::{
+    Address as XdsAddress, TunnelProtocol, Workload as XdsWorkload, WorkloadStatus, WorkloadType,
+    address::Type as AddressType,
+};
 use ztunnel::xds::service::discovery::v3::{
     DeltaDiscoveryRequest, DeltaDiscoveryResponse, Resource,
-    aggregated_discovery_service_server::{AggregatedDiscoveryService, AggregatedDiscoveryServiceServer},
-};
-use ztunnel::xds::istio::workload::{
-    Address as XdsAddress, Workload as XdsWorkload, TunnelProtocol, WorkloadStatus, WorkloadType,
-    address::Type as AddressType,
+    aggregated_discovery_service_server::{
+        AggregatedDiscoveryService, AggregatedDiscoveryServiceServer,
+    },
 };
 use ztunnel::xds::{ADDRESS_TYPE, AUTHORIZATION_TYPE};
 
@@ -68,9 +69,9 @@ const DEFAULT_XDS_PORT: u16 = 15010;
 struct Args {
     zds_socket: PathBuf,
     control_socket: PathBuf,
-    xds_socket: Option<PathBuf>,  // If set, use UDS instead of TCP
+    xds_socket: Option<PathBuf>, // If set, use UDS instead of TCP
     xds_port: u16,
-    upstream_xds: Option<String>,  // If set, connect to upstream XDS server for remote workloads
+    upstream_xds: Option<String>, // If set, connect to upstream XDS server for remote workloads
 }
 
 /// Shared state for WDS workloads
@@ -117,7 +118,11 @@ impl WorkloadStore {
 
     async fn add(&self, workload: StoredWorkload) {
         let uid = workload.uid.clone();
-        self.inner.write().await.workloads.insert(uid, workload.clone());
+        self.inner
+            .write()
+            .await
+            .workloads
+            .insert(uid, workload.clone());
         let _ = self.update_tx.send(WorkloadUpdate::Add(workload));
     }
 
@@ -130,7 +135,13 @@ impl WorkloadStore {
     }
 
     async fn list(&self) -> Vec<StoredWorkload> {
-        self.inner.read().await.workloads.values().cloned().collect()
+        self.inner
+            .read()
+            .await
+            .workloads
+            .values()
+            .cloned()
+            .collect()
     }
 
     async fn get(&self, uid: &str) -> Option<StoredWorkload> {
@@ -243,16 +254,16 @@ fn parse_args() -> Result<Args> {
                 ));
             }
             "--xds-port" => {
-                xds_port = args.next()
+                xds_port = args
+                    .next()
                     .ok_or_else(|| anyhow!("--xds-port requires a port number"))?
                     .parse()
                     .context("--xds-port must be a valid port number")?;
             }
             "--upstream-xds" => {
-                upstream_xds = Some(
-                    args.next()
-                        .ok_or_else(|| anyhow!("--upstream-xds requires a URL (e.g. http://host:port)"))?
-                );
+                upstream_xds = Some(args.next().ok_or_else(|| {
+                    anyhow!("--upstream-xds requires a URL (e.g. http://host:port)")
+                })?);
             }
             "--help" | "-h" | "help" => {
                 print_help();
@@ -282,6 +293,9 @@ enum ZdsCommand {
         namespace: String,
         service_account: String,
         netns_path: PathBuf,
+        vm_internal_ip: Option<String>,
+        transparent_proxy: bool,
+        vm_iface_mode: bool,
         response: oneshot::Sender<Result<String>>,
     },
     Del {
@@ -324,11 +338,14 @@ impl ZdsConnectionManager {
     fn add(&mut self, fd: OwnedFd) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        self.connections.insert(id, ZdsConnection {
+        self.connections.insert(
             id,
-            fd,
-            connected: true,
-        });
+            ZdsConnection {
+                id,
+                fd,
+                connected: true,
+            },
+        );
         id
     }
 
@@ -359,19 +376,17 @@ impl ZdsConnection {
         let mut buf = [0u8; 4096];
         let bytes = {
             let mut iov = [IoSliceMut::new(&mut buf)];
-            let msg = socket::recvmsg::<()>(
-                self.fd.as_raw_fd(),
-                &mut iov,
-                None,
-                MsgFlags::empty(),
-            ).context("Failed to receive hello")?;
+            let msg = socket::recvmsg::<()>(self.fd.as_raw_fd(), &mut iov, None, MsgFlags::empty())
+                .context("Failed to receive hello")?;
             msg.bytes
         };
-        
-        let hello = ZdsHello::decode(&buf[..bytes])
-            .context("Failed to decode hello")?;
-        
-        eprintln!("[ZDS] Received hello from ztunnel, version={}", hello.version);
+
+        let hello = ZdsHello::decode(&buf[..bytes]).context("Failed to decode hello")?;
+
+        eprintln!(
+            "[ZDS] Received hello from ztunnel, version={}",
+            hello.version
+        );
         Ok(())
     }
 
@@ -379,17 +394,13 @@ impl ZdsConnection {
         let mut buf = [0u8; 4096];
         let bytes = {
             let mut iov = [IoSliceMut::new(&mut buf)];
-            let msg = socket::recvmsg::<()>(
-                self.fd.as_raw_fd(),
-                &mut iov,
-                None,
-                MsgFlags::empty(),
-            ).context("Failed to receive ack")?;
+            let msg = socket::recvmsg::<()>(self.fd.as_raw_fd(), &mut iov, None, MsgFlags::empty())
+                .context("Failed to receive ack")?;
             msg.bytes
         };
 
-        let response = WorkloadResponse::decode(&buf[..bytes])
-            .context("Failed to decode response")?;
+        let response =
+            WorkloadResponse::decode(&buf[..bytes]).context("Failed to decode response")?;
 
         match response.payload {
             Some(ResponsePayload::Ack(ack)) => {
@@ -519,9 +530,34 @@ fn create_zds_listener(path: &PathBuf) -> Result<OwnedFd> {
     Ok(socket)
 }
 
+/// Bring up the loopback (lo) device inside the workload's network namespace.
+/// Without this, localhost communication within the netns will not work.
+fn set_lo_up(netns_path: &Path) -> Result<()> {
+    let netns_str = netns_path.to_string_lossy();
+    eprintln!("[ZDS] Setting lo up in netns {}", netns_str);
+
+    let output = Command::new("nsenter")
+        .arg(format!("--net={}", netns_str))
+        .args(["--", "ip", "link", "set", "lo", "up"])
+        .output()
+        .with_context(|| format!("Failed to run nsenter for lo up in {:?}", netns_path))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "Failed to set lo up in netns {:?}: {}",
+            netns_path,
+            stderr.trim()
+        );
+    }
+
+    eprintln!("[ZDS] lo is up in netns {}", netns_str);
+    Ok(())
+}
+
 /// Run the ztunnel-redirect-workload.sh script to install or remove iptables rules
 /// in a workload's network namespace.
-fn run_redirect_script(action: &str, netns_path: &Path) -> Result<()> {
+fn run_redirect_script(action: &str, netns_path: &Path, vm_internal_ip: Option<&str>, transparent_proxy: bool, vm_iface_mode: bool) -> Result<()> {
     // Look for the script in several locations
     let script_candidates = [
         PathBuf::from("/usr/local/bin/ztunnel-redirect-workload.sh"),
@@ -540,17 +576,36 @@ fn run_redirect_script(action: &str, netns_path: &Path) -> Result<()> {
     let script = script_candidates
         .iter()
         .find(|p| p.exists())
-        .ok_or_else(|| anyhow!(
-            "ztunnel-redirect-workload.sh not found in any of: {:?}",
-            script_candidates
-        ))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "ztunnel-redirect-workload.sh not found in any of: {:?}",
+                script_candidates
+            )
+        })?;
 
     let netns_str = netns_path.to_string_lossy();
-    eprintln!("[ZDS] Running redirect script: {} {} {}", script.display(), action, netns_str);
+    eprintln!(
+        "[ZDS] Running redirect script: {} {} {}{}{}{}",
+        script.display(),
+        action,
+        netns_str,
+        vm_internal_ip.map(|ip| format!(" --vm-internal-ip {}", ip)).unwrap_or_default(),
+        if transparent_proxy { " --transparent-proxy" } else { "" },
+        if vm_iface_mode { " --vm-iface-mode" } else { "" }
+    );
 
-    let output = Command::new(script.as_os_str())
-        .arg(action)
-        .arg(netns_str.as_ref())
+    let mut cmd = Command::new(script.as_os_str());
+    cmd.arg(action).arg(netns_str.as_ref());
+    if let Some(ip) = vm_internal_ip {
+        cmd.arg("--vm-internal-ip").arg(ip);
+    }
+    if transparent_proxy {
+        cmd.arg("--transparent-proxy");
+    }
+    if vm_iface_mode {
+        cmd.arg("--vm-iface-mode");
+    }
+    let output = cmd
         .output()
         .with_context(|| format!("Failed to execute redirect script: {}", script.display()))?;
 
@@ -615,12 +670,14 @@ impl XdsService {
             _ => TunnelProtocol::None,
         };
 
-        let addresses: Vec<prost::bytes::Bytes> = workload.ips.iter().map(|ip| {
-            match ip {
+        let addresses: Vec<prost::bytes::Bytes> = workload
+            .ips
+            .iter()
+            .map(|ip| match ip {
                 IpAddr::V4(v4) => prost::bytes::Bytes::from(v4.octets().to_vec()),
                 IpAddr::V6(v6) => prost::bytes::Bytes::from(v6.octets().to_vec()),
-            }
-        }).collect();
+            })
+            .collect();
 
         XdsAddress {
             r#type: Some(AddressType::Workload(XdsWorkload {
@@ -641,17 +698,20 @@ impl XdsService {
     /// Create a DeltaDiscoveryResponse with all current workloads
     async fn create_initial_response(&self, nonce: &str) -> DeltaDiscoveryResponse {
         let workloads = self.store.list().await;
-        let resources: Vec<Resource> = workloads.iter().map(|w| {
-            let xds = Self::workload_to_xds(w);
-            Resource {
-                name: w.uid.clone(),
-                resource: Some(prost_types::Any {
-                    type_url: ADDRESS_TYPE.to_string(),
-                    value: xds.encode_to_vec(),
-                }),
-                ..Default::default()
-            }
-        }).collect();
+        let resources: Vec<Resource> = workloads
+            .iter()
+            .map(|w| {
+                let xds = Self::workload_to_xds(w);
+                Resource {
+                    name: w.uid.clone(),
+                    resource: Some(prost_types::Any {
+                        type_url: ADDRESS_TYPE.to_string(),
+                        value: xds.encode_to_vec(),
+                    }),
+                    ..Default::default()
+                }
+            })
+            .collect();
 
         DeltaDiscoveryResponse {
             type_url: ADDRESS_TYPE.to_string(),
@@ -680,14 +740,12 @@ impl XdsService {
                     ..Default::default()
                 }
             }
-            WorkloadUpdate::Remove(uid) => {
-                DeltaDiscoveryResponse {
-                    type_url: ADDRESS_TYPE.to_string(),
-                    removed_resources: vec![uid.clone()],
-                    nonce: nonce.to_string(),
-                    ..Default::default()
-                }
-            }
+            WorkloadUpdate::Remove(uid) => DeltaDiscoveryResponse {
+                type_url: ADDRESS_TYPE.to_string(),
+                removed_resources: vec![uid.clone()],
+                nonce: nonce.to_string(),
+                ..Default::default()
+            },
         }
     }
 }
@@ -733,7 +791,9 @@ async fn run_upstream_xds_client(
         type_url: ADDRESS_TYPE.to_string(),
         ..Default::default()
     };
-    tx.send(initial_request).await.context("Failed to send initial request")?;
+    tx.send(initial_request)
+        .await
+        .context("Failed to send initial request")?;
 
     let response = client
         .delta_aggregated_resources(Request::new(request_stream))
@@ -752,7 +812,10 @@ async fn run_upstream_xds_client(
             let req = match &update {
                 WorkloadUpdate::Add(workload) => {
                     // Mark this UID as locally-originated to suppress echo-back
-                    local_uids_for_push.write().await.insert(workload.uid.clone());
+                    local_uids_for_push
+                        .write()
+                        .await
+                        .insert(workload.uid.clone());
                     let xds = XdsService::workload_to_xds(workload);
                     eprintln!(
                         "[Upstream Push] Forwarding wds-add upstream: uid={}",
@@ -763,7 +826,10 @@ async fn run_upstream_xds_client(
                         resource_names_subscribe: vec![workload.uid.clone()],
                         initial_resource_versions: std::collections::HashMap::from([(
                             workload.uid.clone(),
-                            xds.encode_to_vec().iter().map(|b| format!("{:02x}", b)).collect::<String>(),
+                            xds.encode_to_vec()
+                                .iter()
+                                .map(|b| format!("{:02x}", b))
+                                .collect::<String>(),
                         )]),
                         ..Default::default()
                     }
@@ -771,10 +837,7 @@ async fn run_upstream_xds_client(
                 WorkloadUpdate::Remove(uid) => {
                     // Remove from local_uids so future remote adds are allowed
                     local_uids_for_push.write().await.remove(uid.as_str());
-                    eprintln!(
-                        "[Upstream Push] Forwarding wds-del upstream: uid={}",
-                        uid
-                    );
+                    eprintln!("[Upstream Push] Forwarding wds-del upstream: uid={}", uid);
                     DeltaDiscoveryRequest {
                         type_url: WORKLOAD_UNREGISTER_TYPE.to_string(),
                         resource_names_unsubscribe: vec![uid.clone()],
@@ -803,8 +866,10 @@ async fn run_upstream_xds_client(
                     match XdsAddress::decode(any.value.as_ref()) {
                         Ok(addr) => {
                             if let Some(AddressType::Workload(wl)) = addr.r#type {
-                                let ips: Vec<IpAddr> = wl.addresses.iter().filter_map(|b| {
-                                    match b.len() {
+                                let ips: Vec<IpAddr> = wl
+                                    .addresses
+                                    .iter()
+                                    .filter_map(|b| match b.len() {
                                         4 => {
                                             let arr: [u8; 4] = b[..4].try_into().ok()?;
                                             Some(IpAddr::V4(std::net::Ipv4Addr::from(arr)))
@@ -814,8 +879,8 @@ async fn run_upstream_xds_client(
                                             Some(IpAddr::V6(std::net::Ipv6Addr::from(arr)))
                                         }
                                         _ => None,
-                                    }
-                                }).collect();
+                                    })
+                                    .collect();
 
                                 let protocol = match TunnelProtocol::try_from(wl.tunnel_protocol) {
                                     Ok(TunnelProtocol::Hbone) => "HBONE".to_string(),
@@ -838,7 +903,10 @@ async fn run_upstream_xds_client(
                                 );
                                 // Suppress echo-back: skip if this UID was locally originated
                                 if local_uids.read().await.contains(&stored.uid) {
-                                    eprintln!("[Upstream XDS] Skipping echo-back add for local uid={}", stored.uid);
+                                    eprintln!(
+                                        "[Upstream XDS] Skipping echo-back add for local uid={}",
+                                        stored.uid
+                                    );
                                 } else {
                                     store.add(stored).await;
                                 }
@@ -859,7 +927,10 @@ async fn run_upstream_xds_client(
                 eprintln!("[Upstream XDS] Removing workload: uid={}", uid);
                 store.remove(uid).await;
             } else {
-                eprintln!("[Upstream XDS] Skipping echo-back remove for local uid={}", uid);
+                eprintln!(
+                    "[Upstream XDS] Skipping echo-back remove for local uid={}",
+                    uid
+                );
             }
         }
 
@@ -879,8 +950,15 @@ async fn run_upstream_xds_client(
     Ok(())
 }
 
-type DeltaStream = Pin<Box<dyn tokio_stream::Stream<Item = Result<DeltaDiscoveryResponse, Status>> + Send>>;
-type SotWStream = Pin<Box<dyn tokio_stream::Stream<Item = Result<ztunnel::xds::service::discovery::v3::DiscoveryResponse, Status>> + Send>>;
+type DeltaStream =
+    Pin<Box<dyn tokio_stream::Stream<Item = Result<DeltaDiscoveryResponse, Status>> + Send>>;
+type SotWStream = Pin<
+    Box<
+        dyn tokio_stream::Stream<
+                Item = Result<ztunnel::xds::service::discovery::v3::DiscoveryResponse, Status>,
+            > + Send,
+    >,
+>;
 
 #[tonic::async_trait]
 impl AggregatedDiscoveryService for XdsService {
@@ -891,7 +969,9 @@ impl AggregatedDiscoveryService for XdsService {
         &self,
         _request: Request<Streaming<ztunnel::xds::service::discovery::v3::DiscoveryRequest>>,
     ) -> Result<Response<Self::StreamAggregatedResourcesStream>, Status> {
-        Err(Status::unimplemented("Use DeltaAggregatedResources instead"))
+        Err(Status::unimplemented(
+            "Use DeltaAggregatedResources instead",
+        ))
     }
 
     async fn delta_aggregated_resources(
@@ -936,35 +1016,41 @@ impl AggregatedDiscoveryService for XdsService {
                 match next_msg.await {
                     Ok(Some(req)) => {
                         let type_url = req.type_url.clone();
-                        eprintln!("[XDS] Received request: type_url={} nonce={}", type_url, req.response_nonce);
+                        eprintln!(
+                            "[XDS] Received request: type_url={} nonce={}",
+                            type_url, req.response_nonce
+                        );
 
                         // If this is an ACK (has response_nonce), don't send a new response
                         if !req.response_nonce.is_empty() {
                             continue;
                         }
-                        
+
                         // Handle initial subscriptions for different types
                         if type_url == ADDRESS_TYPE.to_string() && !sent_address {
                             // Send initial snapshot for Address type
                             let nonce = format!("nonce-{}", nonce_counter);
                             nonce_counter += 1;
-                            
+
                             let store_clone = store.clone();
                             let response = store_clone.inner.read().await;
                             let workloads: Vec<_> = response.workloads.values().cloned().collect();
                             drop(response);
-                            
-                            let resources: Vec<Resource> = workloads.iter().map(|w| {
-                                let xds = XdsService::workload_to_xds(w);
-                                Resource {
-                                    name: w.uid.clone(),
-                                    resource: Some(prost_types::Any {
-                                        type_url: ADDRESS_TYPE.to_string(),
-                                        value: xds.encode_to_vec(),
-                                    }),
-                                    ..Default::default()
-                                }
-                            }).collect();
+
+                            let resources: Vec<Resource> = workloads
+                                .iter()
+                                .map(|w| {
+                                    let xds = XdsService::workload_to_xds(w);
+                                    Resource {
+                                        name: w.uid.clone(),
+                                        resource: Some(prost_types::Any {
+                                            type_url: ADDRESS_TYPE.to_string(),
+                                            value: xds.encode_to_vec(),
+                                        }),
+                                        ..Default::default()
+                                    }
+                                })
+                                .collect();
 
                             let initial_response = DeltaDiscoveryResponse {
                                 type_url: ADDRESS_TYPE.to_string(),
@@ -973,16 +1059,20 @@ impl AggregatedDiscoveryService for XdsService {
                                 ..Default::default()
                             };
 
-                            eprintln!("[XDS] Sending {} Address resources", initial_response.resources.len());
+                            eprintln!(
+                                "[XDS] Sending {} Address resources",
+                                initial_response.resources.len()
+                            );
                             if tx.send(Ok(initial_response)).await.is_err() {
                                 return;
                             }
                             sent_address = true;
-                        } else if type_url == AUTHORIZATION_TYPE.to_string() && !sent_authorization {
+                        } else if type_url == AUTHORIZATION_TYPE.to_string() && !sent_authorization
+                        {
                             // Send empty Authorization response
                             let nonce = format!("nonce-{}", nonce_counter);
                             nonce_counter += 1;
-                            
+
                             let empty_response = DeltaDiscoveryResponse {
                                 type_url: AUTHORIZATION_TYPE.to_string(),
                                 resources: vec![],
@@ -1003,13 +1093,18 @@ impl AggregatedDiscoveryService for XdsService {
                             break;
                         } else if (sent_address || sent_authorization) && deadline.is_none() {
                             // Give 100ms for the other subscription to arrive
-                            deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_millis(100));
+                            deadline = Some(
+                                tokio::time::Instant::now() + std::time::Duration::from_millis(100),
+                            );
                         }
                     }
                     Ok(None) => {
                         if deadline.is_some() {
                             // Timeout expired, break to event loop with what we have
-                            eprintln!("[XDS] Subscription timeout, proceeding with sent_address={} sent_authorization={}", sent_address, sent_authorization);
+                            eprintln!(
+                                "[XDS] Subscription timeout, proceeding with sent_address={} sent_authorization={}",
+                                sent_address, sent_authorization
+                            );
                             break;
                         }
                         eprintln!("[XDS] Client closed connection");
@@ -1208,7 +1303,7 @@ async fn main() -> Result<()> {
 
     // Start XDS gRPC server
     let xds_service = XdsService::new(workload_store.clone());
-    
+
     if let Some(xds_socket) = args.xds_socket {
         // Use UDS for XDS
         let _ = std::fs::remove_file(&xds_socket);
@@ -1217,7 +1312,7 @@ async fn main() -> Result<()> {
         }
         let uds_listener = tokio::net::UnixListener::bind(&xds_socket)?;
         eprintln!("[XDS] Starting gRPC server on UDS {:?}", xds_socket);
-        
+
         tokio::spawn(async move {
             let incoming = tokio_stream::wrappers::UnixListenerStream::new(uds_listener);
             if let Err(e) = tonic::transport::Server::builder()
@@ -1232,7 +1327,7 @@ async fn main() -> Result<()> {
         // Use TCP for XDS
         let xds_addr: SocketAddr = format!("0.0.0.0:{}", args.xds_port).parse()?;
         eprintln!("[XDS] Starting gRPC server on {}", xds_addr);
-        
+
         tokio::spawn(async move {
             if let Err(e) = tonic::transport::Server::builder()
                 .add_service(AggregatedDiscoveryServiceServer::new(xds_service))
@@ -1267,7 +1362,9 @@ async fn main() -> Result<()> {
                     store_for_upstream.clone(),
                     rx,
                     local_uids.clone(),
-                ).await {
+                )
+                .await
+                {
                     Ok(()) => {
                         eprintln!("[Upstream XDS] Connection ended cleanly, reconnecting in 5s...");
                     }
@@ -1321,7 +1418,7 @@ async fn main() -> Result<()> {
                     Ok(Some(fd)) => {
                         let id = conn_manager.add(fd);
                         eprintln!("[ZDS] New ztunnel connection (id={}), total: {}", id, conn_manager.len());
-                        
+
                         // Receive hello and send snapshot for the new connection
                         if let Some(conn) = conn_manager.get(id) {
                             if let Err(e) = conn.recv_hello() {
@@ -1368,13 +1465,13 @@ async fn main() -> Result<()> {
                 let conn = conn_manager.get(conn_id).unwrap();
 
                 match cmd {
-                    ZdsCommand::Add { uid, name, namespace, service_account, netns_path, response } => {
+                    ZdsCommand::Add { uid, name, namespace, service_account, netns_path, vm_internal_ip, transparent_proxy, vm_iface_mode, response } => {
                         let result = (|| {
+                            // Bring up loopback inside the workload's netns
+                            set_lo_up(&netns_path)?;
+
                             // Install iptables redirect rules in the workload's netns
-                            if let Err(e) = run_redirect_script("install", &netns_path) {
-                                eprintln!("[ZDS] WARNING: Failed to install iptables rules: {}", e);
-                                // Non-fatal: continue with the add even if iptables fails
-                            }
+                            run_redirect_script("install", &netns_path, vm_internal_ip.as_deref(), transparent_proxy, vm_iface_mode)?;
 
                             let file = File::open(&netns_path)
                                 .with_context(|| format!("Failed to open netns: {:?}", netns_path))?;
@@ -1401,7 +1498,7 @@ async fn main() -> Result<()> {
                     ZdsCommand::Del { uid, response } => {
                         // Remove iptables redirect rules from the workload's netns
                         if let Some(netns_path) = netns_by_uid.remove(&uid) {
-                            if let Err(e) = run_redirect_script("remove", &netns_path) {
+                            if let Err(e) = run_redirect_script("remove", &netns_path, None, false, false) {
                                 eprintln!("[ZDS] WARNING: Failed to remove iptables rules: {}", e);
                             }
                         }
@@ -1460,7 +1557,9 @@ async fn handle_control_client(
                 break;
             }
             Ok(_) => {
-                let response = handle_control_command(&line.trim(), &cmd_tx, &workload_store, &upstream_tx).await;
+                let response =
+                    handle_control_command(&line.trim(), &cmd_tx, &workload_store, &upstream_tx)
+                        .await;
                 let _ = writer.write_all(format!("{}\n", response).as_bytes()).await;
             }
             Err(e) => {
@@ -1485,22 +1584,25 @@ async fn handle_control_command(
     match parts[0] {
         // ===== WDS COMMANDS (handled directly, no channel) =====
         "wds-add" => {
-            // wds-add <uid> <name> <ns> <sa> <ip> [protocol] [node]
+            // wds-add <uid> <name> <ns> <sa> <ip>[,<ip>...] [protocol] [node]
             if parts.len() < 6 {
-                return "ERROR: Usage: wds-add <uid> <name> <namespace> <sa> <ip> [protocol] [node]".to_string();
+                return "ERROR: Usage: wds-add <uid> <name> <namespace> <sa> <ip>[,<ip>...] [protocol] [node]".to_string();
             }
             let protocol = parts.get(6).map(|s| s.to_string()).unwrap_or_else(|| "HBONE".to_string());
             let node = parts.get(7).map(|s| s.to_string()).unwrap_or_else(|| "test-node".to_string());
-            let ip = match parts[5].parse::<std::net::IpAddr>() {
-                Ok(ip) => ip,
-                Err(e) => return format!("ERROR: Invalid IP address: {}", e),
-            };
+            let mut ips = Vec::new();
+            for ip_str in parts[5].split(',') {
+                match ip_str.trim().parse::<std::net::IpAddr>() {
+                    Ok(ip) => ips.push(ip),
+                    Err(e) => return format!("ERROR: Invalid IP address '{}': {}", ip_str, e),
+                }
+            }
             let workload = StoredWorkload {
                 uid: parts[1].to_string(),
                 name: parts[2].to_string(),
                 namespace: parts[3].to_string(),
                 service_account: parts[4].to_string(),
-                ips: vec![ip],
+                ips,
                 node,
                 protocol,
             };
@@ -1559,8 +1661,9 @@ async fn handle_control_command(
         }
         // ===== ZDS COMMANDS (via channel to main loop) =====
         "add" => {
-            if parts.len() != 6 {
-                return "ERROR: Usage: add <uid> <name> <namespace> <service_account> <netns_path>".to_string();
+            // Usage: add <uid> <name> <namespace> <service_account> <netns_path> [vm_internal_ip] [--transparent-proxy] [--vm-iface-mode]
+            if parts.len() < 6 || parts.len() > 9 {
+                return "ERROR: Usage: add <uid> <name> <namespace> <service_account> <netns_path> [vm_internal_ip] [--transparent-proxy] [--vm-iface-mode]".to_string();
             }
             let (tx, rx) = oneshot::channel();
             let netns_input = parts[5];
@@ -1570,12 +1673,28 @@ async fn handle_control_command(
             } else {
                 PathBuf::from(format!("/var/run/netns/{}", netns_input))
             };
+            // Parse remaining positional/flag args
+            let mut vm_internal_ip = None;
+            let mut transparent_proxy = false;
+            let mut vm_iface_mode = false;
+            for &part in &parts[6..] {
+                if part == "--transparent-proxy" {
+                    transparent_proxy = true;
+                } else if part == "--vm-iface-mode" {
+                    vm_iface_mode = true;
+                } else if vm_internal_ip.is_none() && !part.starts_with('-') {
+                    vm_internal_ip = Some(part.to_string());
+                }
+            }
             let cmd = ZdsCommand::Add {
                 uid: parts[1].to_string(),
                 name: parts[2].to_string(),
                 namespace: parts[3].to_string(),
                 service_account: parts[4].to_string(),
                 netns_path,
+                vm_internal_ip,
+                transparent_proxy,
+                vm_iface_mode,
                 response: tx,
             };
             if cmd_tx.send(cmd).await.is_err() {
@@ -1648,7 +1767,7 @@ async fn handle_control_command(
             }
         }
         "help" => {
-            "ZDS Commands: add <uid> <name> <ns> <sa> <netns>, del <uid>, keep <uid>, snapshot, status\nWDS Commands: wds-add <uid> <name> <ns> <sa> <ip> [proto] [node], wds-del <uid>, wds-list, wds-get <uid>".to_string()
+            "ZDS Commands: add <uid> <name> <ns> <sa> <netns>, del <uid>, keep <uid>, snapshot, status\nWDS Commands: wds-add <uid> <name> <ns> <sa> <ip>[,<ip>...] [proto] [node], wds-del <uid>, wds-list, wds-get <uid>".to_string()
         }
         _ => {
             format!("ERROR: Unknown command: {}. Use 'help' for commands.", parts[0])

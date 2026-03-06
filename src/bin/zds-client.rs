@@ -32,21 +32,20 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 // Use the ZDS proto definitions from ztunnel lib
+use tokio::runtime::Runtime;
+use tokio_stream::StreamExt;
+use tonic::transport::{Channel, Uri};
 use ztunnel::inpod::istio::zds::{
     Ack, AddWorkload, DelWorkload, SnapshotSent, WorkloadInfo, WorkloadRequest, WorkloadResponse,
     ZdsHello,
 };
-use ztunnel::xds::{LocalConfig, LocalWorkload, ADDRESS_TYPE};
-use ztunnel::xds::istio::workload::Address as XdsAddress;
-use ztunnel::xds::service::discovery::v3::{
-    DeltaDiscoveryRequest,
-    aggregated_discovery_service_client::AggregatedDiscoveryServiceClient,
-};
 use ztunnel::state::workload::{HealthStatus, InboundProtocol, Locality, NetworkMode, Workload};
 use ztunnel::strng::Strng;
-use tokio::runtime::Runtime;
-use tonic::transport::{Channel, Uri};
-use tokio_stream::StreamExt;
+use ztunnel::xds::istio::workload::Address as XdsAddress;
+use ztunnel::xds::service::discovery::v3::{
+    DeltaDiscoveryRequest, aggregated_discovery_service_client::AggregatedDiscoveryServiceClient,
+};
+use ztunnel::xds::{ADDRESS_TYPE, LocalConfig, LocalWorkload};
 
 #[derive(Debug)]
 struct Args {
@@ -100,18 +99,11 @@ enum ConfigSubcommand {
         services: Vec<(String, u16, u16)>, // (service_name, port, target_port)
     },
     /// Remove a workload from the config file
-    RemoveWorkload {
-        config_path: PathBuf,
-        uid: String,
-    },
+    RemoveWorkload { config_path: PathBuf, uid: String },
     /// Show the current config
-    Show {
-        config_path: PathBuf,
-    },
+    Show { config_path: PathBuf },
     /// Initialize an empty config file
-    Init {
-        config_path: PathBuf,
-    },
+    Init { config_path: PathBuf },
 }
 
 #[derive(Debug)]
@@ -353,12 +345,15 @@ fn parse_config_command<I>(args: &mut std::iter::Peekable<I>) -> Result<Command>
 where
     I: Iterator<Item = String>,
 {
-    let subcommand = args.next().ok_or_else(|| anyhow!("config requires a subcommand"))?;
-    
+    let subcommand = args
+        .next()
+        .ok_or_else(|| anyhow!("config requires a subcommand"))?;
+
     match subcommand.as_str() {
         "init" => {
             let config_path = PathBuf::from(
-                args.next().ok_or_else(|| anyhow!("config init requires CONFIG_PATH"))?,
+                args.next()
+                    .ok_or_else(|| anyhow!("config init requires CONFIG_PATH"))?,
             );
             Ok(Command::Config {
                 subcommand: ConfigSubcommand::Init { config_path },
@@ -366,7 +361,8 @@ where
         }
         "show" => {
             let config_path = PathBuf::from(
-                args.next().ok_or_else(|| anyhow!("config show requires CONFIG_PATH"))?,
+                args.next()
+                    .ok_or_else(|| anyhow!("config show requires CONFIG_PATH"))?,
             );
             Ok(Command::Config {
                 subcommand: ConfigSubcommand::Show { config_path },
@@ -374,9 +370,10 @@ where
         }
         "add-workload" => {
             let config_path = PathBuf::from(
-                args.next().ok_or_else(|| anyhow!("config add-workload requires CONFIG_PATH"))?,
+                args.next()
+                    .ok_or_else(|| anyhow!("config add-workload requires CONFIG_PATH"))?,
             );
-            
+
             // Parse options
             let mut uid = None;
             let mut name = None;
@@ -387,23 +384,61 @@ where
             let mut node = None;
             let mut network = None;
             let mut services = Vec::new();
-            
+
             while let Some(opt) = args.next() {
                 match opt.as_str() {
-                    "--uid" => uid = Some(args.next().ok_or_else(|| anyhow!("--uid requires a value"))?),
-                    "--name" => name = Some(args.next().ok_or_else(|| anyhow!("--name requires a value"))?),
-                    "--namespace" | "--ns" => namespace = Some(args.next().ok_or_else(|| anyhow!("--namespace requires a value"))?),
-                    "--sa" | "--service-account" => service_account = Some(args.next().ok_or_else(|| anyhow!("--sa requires a value"))?),
+                    "--uid" => {
+                        uid = Some(
+                            args.next()
+                                .ok_or_else(|| anyhow!("--uid requires a value"))?,
+                        )
+                    }
+                    "--name" => {
+                        name = Some(
+                            args.next()
+                                .ok_or_else(|| anyhow!("--name requires a value"))?,
+                        )
+                    }
+                    "--namespace" | "--ns" => {
+                        namespace = Some(
+                            args.next()
+                                .ok_or_else(|| anyhow!("--namespace requires a value"))?,
+                        )
+                    }
+                    "--sa" | "--service-account" => {
+                        service_account = Some(
+                            args.next()
+                                .ok_or_else(|| anyhow!("--sa requires a value"))?,
+                        )
+                    }
                     "--ip" => {
-                        let ip_str = args.next().ok_or_else(|| anyhow!("--ip requires a value"))?;
+                        let ip_str = args
+                            .next()
+                            .ok_or_else(|| anyhow!("--ip requires a value"))?;
                         let ip: IpAddr = ip_str.parse().context("Invalid IP address")?;
                         workload_ips.push(ip);
                     }
-                    "--protocol" => protocol = args.next().ok_or_else(|| anyhow!("--protocol requires a value"))?,
-                    "--node" => node = Some(args.next().ok_or_else(|| anyhow!("--node requires a value"))?),
-                    "--network" => network = Some(args.next().ok_or_else(|| anyhow!("--network requires a value"))?),
+                    "--protocol" => {
+                        protocol = args
+                            .next()
+                            .ok_or_else(|| anyhow!("--protocol requires a value"))?
+                    }
+                    "--node" => {
+                        node = Some(
+                            args.next()
+                                .ok_or_else(|| anyhow!("--node requires a value"))?,
+                        )
+                    }
+                    "--network" => {
+                        network = Some(
+                            args.next()
+                                .ok_or_else(|| anyhow!("--network requires a value"))?,
+                        )
+                    }
                     "--service" => {
-                        let svc_str = args.next().ok_or_else(|| anyhow!("--service requires a value"))?;
+                        let svc_str = args
+                            .next()
+                            .ok_or_else(|| anyhow!("--service requires a value"))?;
                         let parts: Vec<&str> = svc_str.split(':').collect();
                         if parts.len() != 3 {
                             bail!("--service format: SERVICE_NAME:PORT:TARGET_PORT");
@@ -415,16 +450,16 @@ where
                     _ => bail!("Unknown option: {}", opt),
                 }
             }
-            
+
             let uid = uid.ok_or_else(|| anyhow!("--uid is required"))?;
             let name = name.ok_or_else(|| anyhow!("--name is required"))?;
             let namespace = namespace.ok_or_else(|| anyhow!("--namespace is required"))?;
             let service_account = service_account.ok_or_else(|| anyhow!("--sa is required"))?;
-            
+
             if workload_ips.is_empty() {
                 bail!("At least one --ip is required");
             }
-            
+
             Ok(Command::Config {
                 subcommand: ConfigSubcommand::AddWorkload {
                     config_path,
@@ -442,19 +477,25 @@ where
         }
         "remove-workload" => {
             let config_path = PathBuf::from(
-                args.next().ok_or_else(|| anyhow!("config remove-workload requires CONFIG_PATH"))?,
+                args.next()
+                    .ok_or_else(|| anyhow!("config remove-workload requires CONFIG_PATH"))?,
             );
-            
+
             let mut uid = None;
             while let Some(opt) = args.next() {
                 match opt.as_str() {
-                    "--uid" => uid = Some(args.next().ok_or_else(|| anyhow!("--uid requires a value"))?),
+                    "--uid" => {
+                        uid = Some(
+                            args.next()
+                                .ok_or_else(|| anyhow!("--uid requires a value"))?,
+                        )
+                    }
                     _ => bail!("Unknown option: {}", opt),
                 }
             }
-            
+
             let uid = uid.ok_or_else(|| anyhow!("--uid is required"))?;
-            
+
             Ok(Command::Config {
                 subcommand: ConfigSubcommand::RemoveWorkload { config_path, uid },
             })
@@ -469,12 +510,13 @@ where
 {
     let mut control_socket = PathBuf::from("/var/run/ztunnel/control.sock");
     let mut command_parts = Vec::new();
-    
+
     while let Some(opt) = args.next() {
         match opt.as_str() {
             "--control-socket" | "-c" => {
                 control_socket = PathBuf::from(
-                    args.next().ok_or_else(|| anyhow!("--control-socket requires a path"))?,
+                    args.next()
+                        .ok_or_else(|| anyhow!("--control-socket requires a path"))?,
                 );
             }
             _ => {
@@ -488,13 +530,13 @@ where
             }
         }
     }
-    
+
     if command_parts.is_empty() {
         bail!("send requires a command. Use 'zds-client send --help' for usage.");
     }
-    
+
     let command = command_parts.join(" ");
-    
+
     Ok(Command::Send {
         control_socket,
         command,
@@ -505,44 +547,57 @@ fn parse_wds_command<I>(args: &mut std::iter::Peekable<I>) -> Result<Command>
 where
     I: Iterator<Item = String>,
 {
-    let subcommand = args.next().ok_or_else(|| anyhow!("wds requires a subcommand (list, get)"))?;
-    
+    let subcommand = args
+        .next()
+        .ok_or_else(|| anyhow!("wds requires a subcommand (list, get)"))?;
+
     match subcommand.as_str() {
         "list" => {
             let mut address = "localhost:15010".to_string();
             let mut tls = false;
-            let mut node_id = "ztunnel~127.0.0.1~test.default~default.svc.cluster.local".to_string();
+            let mut node_id =
+                "ztunnel~127.0.0.1~test.default~default.svc.cluster.local".to_string();
             let mut timeout_secs = 10u64;
             let mut format = "table".to_string();
             let mut namespace: Option<String> = None;
-            
+
             while let Some(opt) = args.next() {
                 match opt.as_str() {
                     "--address" | "-a" => {
-                        address = args.next().ok_or_else(|| anyhow!("--address requires a value"))?;
+                        address = args
+                            .next()
+                            .ok_or_else(|| anyhow!("--address requires a value"))?;
                     }
                     "--tls" => {
                         tls = true;
                     }
                     "--node-id" => {
-                        node_id = args.next().ok_or_else(|| anyhow!("--node-id requires a value"))?;
+                        node_id = args
+                            .next()
+                            .ok_or_else(|| anyhow!("--node-id requires a value"))?;
                     }
                     "--timeout" => {
-                        timeout_secs = args.next()
+                        timeout_secs = args
+                            .next()
                             .ok_or_else(|| anyhow!("--timeout requires a value"))?
                             .parse()
                             .context("--timeout must be a number")?;
                     }
                     "--format" | "-f" => {
-                        format = args.next().ok_or_else(|| anyhow!("--format requires a value"))?;
+                        format = args
+                            .next()
+                            .ok_or_else(|| anyhow!("--format requires a value"))?;
                     }
                     "--namespace" | "--ns" => {
-                        namespace = Some(args.next().ok_or_else(|| anyhow!("--namespace requires a value"))?);
+                        namespace = Some(
+                            args.next()
+                                .ok_or_else(|| anyhow!("--namespace requires a value"))?,
+                        );
                     }
                     _ => bail!("Unknown option for wds list: {}", opt),
                 }
             }
-            
+
             Ok(Command::Wds {
                 subcommand: WdsSubcommand::List {
                     address,
@@ -557,33 +612,43 @@ where
         "get" => {
             let mut address = "localhost:15010".to_string();
             let mut tls = false;
-            let mut node_id = "ztunnel~127.0.0.1~test.default~default.svc.cluster.local".to_string();
+            let mut node_id =
+                "ztunnel~127.0.0.1~test.default~default.svc.cluster.local".to_string();
             let mut format = "yaml".to_string();
             let mut uid: Option<String> = None;
-            
+
             while let Some(opt) = args.next() {
                 match opt.as_str() {
                     "--address" | "-a" => {
-                        address = args.next().ok_or_else(|| anyhow!("--address requires a value"))?;
+                        address = args
+                            .next()
+                            .ok_or_else(|| anyhow!("--address requires a value"))?;
                     }
                     "--tls" => {
                         tls = true;
                     }
                     "--node-id" => {
-                        node_id = args.next().ok_or_else(|| anyhow!("--node-id requires a value"))?;
+                        node_id = args
+                            .next()
+                            .ok_or_else(|| anyhow!("--node-id requires a value"))?;
                     }
                     "--format" | "-f" => {
-                        format = args.next().ok_or_else(|| anyhow!("--format requires a value"))?;
+                        format = args
+                            .next()
+                            .ok_or_else(|| anyhow!("--format requires a value"))?;
                     }
                     "--uid" => {
-                        uid = Some(args.next().ok_or_else(|| anyhow!("--uid requires a value"))?);
+                        uid = Some(
+                            args.next()
+                                .ok_or_else(|| anyhow!("--uid requires a value"))?,
+                        );
                     }
                     _ => bail!("Unknown option for wds get: {}", opt),
                 }
             }
-            
+
             let uid = uid.ok_or_else(|| anyhow!("--uid is required for wds get"))?;
-            
+
             Ok(Command::Wds {
                 subcommand: WdsSubcommand::Get {
                     address,
@@ -594,7 +659,10 @@ where
                 },
             })
         }
-        _ => bail!("Unknown wds subcommand: {}. Use 'list' or 'get'.", subcommand),
+        _ => bail!(
+            "Unknown wds subcommand: {}. Use 'list' or 'get'.",
+            subcommand
+        ),
     }
 }
 
@@ -837,7 +905,7 @@ fn run_config_init(config_path: &PathBuf) -> Result<()> {
     if config_path.exists() {
         bail!("Config file already exists: {:?}", config_path);
     }
-    
+
     let config = LocalConfig::default();
     save_config(config_path, &config)?;
     eprintln!("Initialized empty config at {:?}", config_path);
@@ -864,19 +932,23 @@ fn run_config_add_workload(
     services: Vec<(String, u16, u16)>,
 ) -> Result<()> {
     let mut config = load_config(config_path)?;
-    
+
     // Check if workload already exists
-    if config.workloads.iter().any(|w| w.workload.uid.as_str() == uid) {
+    if config
+        .workloads
+        .iter()
+        .any(|w| w.workload.uid.as_str() == uid)
+    {
         bail!("Workload with uid '{}' already exists", uid);
     }
-    
+
     // Parse protocol
     let inbound_protocol = match protocol.to_uppercase().as_str() {
         "HBONE" => InboundProtocol::HBONE,
         "TCP" => InboundProtocol::TCP,
         _ => bail!("Invalid protocol: {}. Use HBONE or TCP", protocol),
     };
-    
+
     // Build services map
     let services_map: HashMap<String, HashMap<u16, u16>> = services
         .into_iter()
@@ -891,7 +963,7 @@ fn run_config_add_workload(
                 .extend(port_map);
             acc
         });
-    
+
     // Create workload with all fields explicitly set
     let workload = Workload {
         workload_ips,
@@ -920,29 +992,29 @@ fn run_config_add_workload(
         services: Vec::new(),
         capacity: 1,
     };
-    
+
     let local_workload = LocalWorkload {
         workload,
         services: services_map,
     };
-    
+
     config.workloads.push(local_workload);
     save_config(config_path, &config)?;
-    
+
     eprintln!("Added workload '{}' to {:?}", uid, config_path);
     Ok(())
 }
 
 fn run_config_remove_workload(config_path: &PathBuf, uid: &str) -> Result<()> {
     let mut config = load_config(config_path)?;
-    
+
     let original_len = config.workloads.len();
     config.workloads.retain(|w| w.workload.uid.as_str() != uid);
-    
+
     if config.workloads.len() == original_len {
         bail!("Workload with uid '{}' not found", uid);
     }
-    
+
     save_config(config_path, &config)?;
     eprintln!("Removed workload '{}' from {:?}", uid, config_path);
     Ok(())
@@ -951,23 +1023,25 @@ fn run_config_remove_workload(config_path: &PathBuf, uid: &str) -> Result<()> {
 fn run_send_command(control_socket: &PathBuf, command: &str) -> Result<()> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
-    
+
     eprintln!("Connecting to control socket: {:?}", control_socket);
-    
+
     let mut stream = UnixStream::connect(control_socket)
         .with_context(|| format!("Failed to connect to control socket: {:?}", control_socket))?;
-    
+
     eprintln!("Connected! Sending: {}", command);
-    
+
     // Send the command
     writeln!(stream, "{}", command).context("Failed to send command")?;
     stream.flush()?;
-    
+
     // Read response
     let mut reader = BufReader::new(&stream);
     let mut response = String::new();
-    reader.read_line(&mut response).context("Failed to read response")?;
-    
+    reader
+        .read_line(&mut response)
+        .context("Failed to read response")?;
+
     let response = response.trim();
     if response.starts_with("ERROR:") {
         eprintln!("{}", response);
@@ -975,7 +1049,7 @@ fn run_send_command(control_socket: &PathBuf, command: &str) -> Result<()> {
     } else {
         println!("{}", response);
     }
-    
+
     Ok(())
 }
 
@@ -996,7 +1070,15 @@ fn run_wds_command(subcommand: WdsSubcommand) -> Result<()> {
                 format,
                 namespace,
             } => {
-                run_wds_list(&address, tls, &node_id, timeout_secs, &format, namespace.as_deref()).await
+                run_wds_list(
+                    &address,
+                    tls,
+                    &node_id,
+                    timeout_secs,
+                    &format,
+                    namespace.as_deref(),
+                )
+                .await
             }
             WdsSubcommand::Get {
                 address,
@@ -1004,9 +1086,7 @@ fn run_wds_command(subcommand: WdsSubcommand) -> Result<()> {
                 node_id,
                 uid,
                 format,
-            } => {
-                run_wds_get(&address, tls, &node_id, &uid, &format).await
-            }
+            } => run_wds_get(&address, tls, &node_id, &uid, &format).await,
         }
     })
 }
@@ -1015,16 +1095,19 @@ async fn create_xds_channel(address: &str, tls: bool) -> Result<Channel> {
     if tls {
         bail!("TLS is not supported in this build. Use plaintext connection (default port 15010)");
     }
-    
+
     let uri: Uri = format!("http://{}", address)
         .parse()
         .context("Invalid address")?;
-    
+
     let endpoint = Channel::builder(uri)
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(30));
-    
-    endpoint.connect().await.context("Failed to connect to XDS server")
+
+    endpoint
+        .connect()
+        .await
+        .context("Failed to connect to XDS server")
 }
 
 async fn run_wds_list(
@@ -1036,12 +1119,12 @@ async fn run_wds_list(
     namespace_filter: Option<&str>,
 ) -> Result<()> {
     eprintln!("Connecting to istiod at {} (TLS: {})...", address, tls);
-    
+
     let channel = create_xds_channel(address, tls).await?;
     let mut client = AggregatedDiscoveryServiceClient::new(channel);
-    
+
     eprintln!("Connected! Subscribing to workload resources...");
-    
+
     // Create the initial discovery request
     let initial_request = DeltaDiscoveryRequest {
         type_url: ADDRESS_TYPE.to_string(),
@@ -1052,52 +1135,60 @@ async fn run_wds_list(
         resource_names_subscribe: vec!["*".to_string()], // Subscribe to all
         ..Default::default()
     };
-    
+
     // Create a stream
     let (tx, rx) = tokio::sync::mpsc::channel(32);
-    tx.send(initial_request).await.context("Failed to send initial request")?;
-    
+    tx.send(initial_request)
+        .await
+        .context("Failed to send initial request")?;
+
     let request_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-    
+
     let mut response_stream = client
         .delta_aggregated_resources(request_stream)
         .await
         .context("Failed to start delta stream")?
         .into_inner();
-    
+
     // Collect workloads with timeout
     let mut workloads: Vec<XdsAddress> = Vec::new();
-    let timeout = tokio::time::timeout(
-        Duration::from_secs(timeout_secs),
-        async {
-            while let Some(response) = response_stream.next().await {
-                match response {
-                    Ok(resp) => {
-                        eprintln!("Received {} resources", resp.resources.len());
-                        for resource in &resp.resources {
-                            match XdsAddress::decode(resource.resource.as_ref().map(|r| r.value.as_slice()).unwrap_or(&[])) {
-                                Ok(addr) => workloads.push(addr),
-                                Err(e) => eprintln!("Failed to decode resource {}: {}", resource.name, e),
+    let timeout = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
+        while let Some(response) = response_stream.next().await {
+            match response {
+                Ok(resp) => {
+                    eprintln!("Received {} resources", resp.resources.len());
+                    for resource in &resp.resources {
+                        match XdsAddress::decode(
+                            resource
+                                .resource
+                                .as_ref()
+                                .map(|r| r.value.as_slice())
+                                .unwrap_or(&[]),
+                        ) {
+                            Ok(addr) => workloads.push(addr),
+                            Err(e) => {
+                                eprintln!("Failed to decode resource {}: {}", resource.name, e)
                             }
                         }
-                        // After receiving the first batch, we can stop
-                        if !resp.resources.is_empty() {
-                            break;
-                        }
                     }
-                    Err(e) => {
-                        eprintln!("Stream error: {}", e);
+                    // After receiving the first batch, we can stop
+                    if !resp.resources.is_empty() {
                         break;
                     }
                 }
+                Err(e) => {
+                    eprintln!("Stream error: {}", e);
+                    break;
+                }
             }
         }
-    );
-    
+    });
+
     let _ = timeout.await;
-    
+
     // Filter by namespace if specified
-    let workloads: Vec<_> = workloads.into_iter()
+    let workloads: Vec<_> = workloads
+        .into_iter()
         .filter(|addr| {
             if let Some(ns_filter) = namespace_filter {
                 match &addr.r#type {
@@ -1111,10 +1202,10 @@ async fn run_wds_list(
             }
         })
         .collect();
-    
+
     // Display results
     display_workloads(&workloads, format)?;
-    
+
     Ok(())
 }
 
@@ -1126,12 +1217,12 @@ async fn run_wds_get(
     format: &str,
 ) -> Result<()> {
     eprintln!("Connecting to istiod at {} (TLS: {})...", address, tls);
-    
+
     let channel = create_xds_channel(address, tls).await?;
     let mut client = AggregatedDiscoveryServiceClient::new(channel);
-    
+
     eprintln!("Connected! Requesting workload: {}", uid);
-    
+
     // Create the discovery request for specific resource
     let initial_request = DeltaDiscoveryRequest {
         type_url: ADDRESS_TYPE.to_string(),
@@ -1142,48 +1233,53 @@ async fn run_wds_get(
         resource_names_subscribe: vec![uid.to_string()],
         ..Default::default()
     };
-    
+
     let (tx, rx) = tokio::sync::mpsc::channel(32);
-    tx.send(initial_request).await.context("Failed to send initial request")?;
-    
+    tx.send(initial_request)
+        .await
+        .context("Failed to send initial request")?;
+
     let request_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-    
+
     let mut response_stream = client
         .delta_aggregated_resources(request_stream)
         .await
         .context("Failed to start delta stream")?
         .into_inner();
-    
+
     // Wait for the response
-    let timeout = tokio::time::timeout(
-        Duration::from_secs(10),
-        async {
-            while let Some(response) = response_stream.next().await {
-                match response {
-                    Ok(resp) => {
-                        for resource in &resp.resources {
-                            if resource.name == uid || resp.resources.len() == 1 {
-                                match XdsAddress::decode(resource.resource.as_ref().map(|r| r.value.as_slice()).unwrap_or(&[])) {
-                                    Ok(addr) => {
-                                        display_workloads(&[addr], format)?;
-                                        return Ok(());
-                                    }
-                                    Err(e) => return Err(anyhow!("Failed to decode resource: {}", e)),
+    let timeout = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(response) = response_stream.next().await {
+            match response {
+                Ok(resp) => {
+                    for resource in &resp.resources {
+                        if resource.name == uid || resp.resources.len() == 1 {
+                            match XdsAddress::decode(
+                                resource
+                                    .resource
+                                    .as_ref()
+                                    .map(|r| r.value.as_slice())
+                                    .unwrap_or(&[]),
+                            ) {
+                                Ok(addr) => {
+                                    display_workloads(&[addr], format)?;
+                                    return Ok(());
                                 }
+                                Err(e) => return Err(anyhow!("Failed to decode resource: {}", e)),
                             }
                         }
-                        // Check removed resources
-                        if resp.removed_resources.contains(&uid.to_string()) {
-                            return Err(anyhow!("Workload {} was removed", uid));
-                        }
                     }
-                    Err(e) => return Err(anyhow!("Stream error: {}", e)),
+                    // Check removed resources
+                    if resp.removed_resources.contains(&uid.to_string()) {
+                        return Err(anyhow!("Workload {} was removed", uid));
+                    }
                 }
+                Err(e) => return Err(anyhow!("Stream error: {}", e)),
             }
-            Err(anyhow!("No response received for workload {}", uid))
         }
-    );
-    
+        Err(anyhow!("No response received for workload {}", uid))
+    });
+
     match timeout.await {
         Ok(result) => result,
         Err(_) => Err(anyhow!("Timeout waiting for workload {}", uid)),
@@ -1194,41 +1290,60 @@ fn display_workloads(addresses: &[XdsAddress], format: &str) -> Result<()> {
     match format {
         "json" => {
             // Convert to JSON-serializable format
-            let json_data: Vec<_> = addresses.iter()
+            let json_data: Vec<_> = addresses
+                .iter()
                 .filter_map(|addr| extract_workload_info(addr))
                 .collect();
-            println!("{}", serde_json::to_string_pretty(&json_data).context("Failed to serialize to JSON")?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json_data).context("Failed to serialize to JSON")?
+            );
         }
         "yaml" => {
-            let yaml_data: Vec<_> = addresses.iter()
+            let yaml_data: Vec<_> = addresses
+                .iter()
                 .filter_map(|addr| extract_workload_info(addr))
                 .collect();
-            println!("{}", serde_yaml::to_string(&yaml_data).context("Failed to serialize to YAML")?);
+            println!(
+                "{}",
+                serde_yaml::to_string(&yaml_data).context("Failed to serialize to YAML")?
+            );
         }
         "table" | _ => {
             // Table format
-            println!("{:<50} {:<15} {:<15} {:<20} {:<15}",
-                "UID", "NAME", "NAMESPACE", "SERVICE_ACCOUNT", "IPS");
+            println!(
+                "{:<50} {:<15} {:<15} {:<20} {:<15}",
+                "UID", "NAME", "NAMESPACE", "SERVICE_ACCOUNT", "IPS"
+            );
             println!("{}", "-".repeat(115));
-            
+
             for addr in addresses {
                 if let Some(info) = extract_workload_info(addr) {
                     let ips_str = info.ips.join(", ");
-                    println!("{:<50} {:<15} {:<15} {:<20} {:<15}",
+                    println!(
+                        "{:<50} {:<15} {:<15} {:<20} {:<15}",
                         truncate(&info.uid, 50),
                         truncate(&info.name, 15),
                         truncate(&info.namespace, 15),
                         truncate(&info.service_account, 20),
-                        truncate(&ips_str, 15));
+                        truncate(&ips_str, 15)
+                    );
                 }
             }
-            
-            println!("\nTotal: {} workloads", addresses.iter()
-                .filter(|a| matches!(&a.r#type, Some(ztunnel::xds::istio::workload::address::Type::Workload(_))))
-                .count());
+
+            println!(
+                "\nTotal: {} workloads",
+                addresses
+                    .iter()
+                    .filter(|a| matches!(
+                        &a.r#type,
+                        Some(ztunnel::xds::istio::workload::address::Type::Workload(_))
+                    ))
+                    .count()
+            );
         }
     }
-    
+
     Ok(())
 }
 
@@ -1249,33 +1364,34 @@ struct WorkloadDisplayInfo {
 fn extract_workload_info(addr: &XdsAddress) -> Option<WorkloadDisplayInfo> {
     match &addr.r#type {
         Some(ztunnel::xds::istio::workload::address::Type::Workload(w)) => {
-            let ips: Vec<String> = w.addresses.iter()
-                .map(|bytes| {
-                    match bytes.len() {
-                        4 => std::net::Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]).to_string(),
+            let ips: Vec<String> =
+                w.addresses
+                    .iter()
+                    .map(|bytes| match bytes.len() {
+                        4 => std::net::Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3])
+                            .to_string(),
                         16 => {
                             let arr: [u8; 16] = <[u8; 16]>::try_from(&bytes[..]).unwrap_or([0; 16]);
                             std::net::Ipv6Addr::from(arr).to_string()
                         }
                         _ => format!("invalid({} bytes)", bytes.len()),
-                    }
-                })
-                .collect();
-            
-            let waypoint = w.waypoint.as_ref().map(|gw| {
-                format!("{:?}", gw)
-            });
-            
+                    })
+                    .collect();
+
+            let waypoint = w.waypoint.as_ref().map(|gw| format!("{:?}", gw));
+
             let protocol = match w.tunnel_protocol() {
                 ztunnel::xds::istio::workload::TunnelProtocol::None => "NONE",
                 ztunnel::xds::istio::workload::TunnelProtocol::Hbone => "HBONE",
-            }.to_string();
-            
+            }
+            .to_string();
+
             let status = match w.status() {
                 ztunnel::xds::istio::workload::WorkloadStatus::Healthy => "Healthy",
                 ztunnel::xds::istio::workload::WorkloadStatus::Unhealthy => "Unhealthy",
-            }.to_string();
-            
+            }
+            .to_string();
+
             Some(WorkloadDisplayInfo {
                 uid: w.uid.clone(),
                 name: w.name.clone(),
@@ -1348,7 +1464,10 @@ fn main() -> Result<()> {
                 }
             };
         }
-        Command::Send { control_socket, command } => {
+        Command::Send {
+            control_socket,
+            command,
+        } => {
             return run_send_command(&control_socket, &command);
         }
         Command::Wds { subcommand } => {
@@ -1393,7 +1512,9 @@ fn main() -> Result<()> {
         Command::Interactive => {
             run_interactive(&client)?;
         }
-        Command::Help | Command::Config { .. } | Command::Send { .. } | Command::Wds { .. } => unreachable!(),
+        Command::Help | Command::Config { .. } | Command::Send { .. } | Command::Wds { .. } => {
+            unreachable!()
+        }
     }
 
     Ok(())

@@ -71,15 +71,17 @@ impl ManifestPidFetcher {
         }
 
         // Strategy 2: Scan all subdirectories for a manifest.json containing matching id
-        let mut entries = tokio::fs::read_dir(&self.instances_dir).await.map_err(|e| {
-            std::io::Error::new(
-                e.kind(),
-                format!(
-                    "Failed to read instances directory {:?}: {}",
-                    self.instances_dir, e
-                ),
-            )
-        })?;
+        let mut entries = tokio::fs::read_dir(&self.instances_dir)
+            .await
+            .map_err(|e| {
+                std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "Failed to read instances directory {:?}: {}",
+                        self.instances_dir, e
+                    ),
+                )
+            })?;
 
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
@@ -150,16 +152,12 @@ mod tests {
     #[cfg(feature = "testing")]
     use tempfile::TempDir;
 
-    fn make_manifest_dir(
-        base: &std::path::Path,
-        instance_id: &str,
-        shim_pid: i32,
-    ) -> PathBuf {
+    fn make_manifest_dir(base: &std::path::Path, instance_id: &str, vmm_pid: i32) -> PathBuf {
         let dir = base.join(instance_id);
         fs::create_dir_all(&dir).unwrap();
         let manifest = serde_json::json!({
             "id": instance_id,
-            "shimProcessId": shim_pid,
+            "vmmProcessId": vmm_pid,
             "bundle": format!("/instances/{}", instance_id),
         });
         fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap();
@@ -188,7 +186,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let manifest = serde_json::json!({
             "id": "my-workload-uid",
-            "shimProcessId": 99,
+            "vmmProcessId": 99,
         });
         fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap();
 
@@ -217,7 +215,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let manifest = serde_json::json!({
             "id": "bad-pid",
-            "shimProcessId": 0,
+            "vmmProcessId": 0,
         });
         fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap();
 

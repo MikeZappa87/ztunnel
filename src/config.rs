@@ -135,6 +135,7 @@ const CONTAINER_RUNTIME_SOCK_PATH: &str = "CONTAINER_RUNTIME_SOCK_PATH";
 // "manifest" = read from manifest.json files in INSTANCES_DIR
 const PID_SOURCE: &str = "PID_SOURCE";
 const INSTANCES_DIR: &str = "INSTANCES_DIR";
+const TRANSPARENT_NETWORK_POLICIES: &str = "TRANSPARENT_NETWORK_POLICIES";
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
@@ -346,6 +347,7 @@ pub struct Config {
     /// Directory containing instance manifest.json files (used when pid_source="manifest")
     /// Each instance has a subdirectory with a manifest.json containing shimProcessId.
     pub instances_dir: String,
+    pub transparent_network_policies: bool,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -921,6 +923,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             SPIRE_ADMIN_SOCKET,
             "unix:///run/spire/sockets/admin.sock".to_string(),
         )?,
+        transparent_network_policies: parse_default(TRANSPARENT_NETWORK_POLICIES, false)?,
     })
 }
 
