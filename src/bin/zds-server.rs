@@ -96,8 +96,10 @@ struct StoredWorkload {
     protocol: String,
 }
 
-/// Channel for pushing local WDS changes to upstream XDS aggregator
-type UpstreamPushTx = mpsc::Sender<WorkloadUpdate>;
+/// Channel for pushing local WDS changes to upstream XDS aggregator.
+/// Wrapped in Arc<Mutex<>> so the reconnect loop can swap in a fresh channel
+/// after each upstream connection drops.
+type UpstreamPushTx = Arc<tokio::sync::Mutex<mpsc::Sender<WorkloadUpdate>>>;
 
 #[derive(Clone, Debug)]
 enum WorkloadUpdate {
@@ -1342,25 +1344,23 @@ async fn main() -> Result<()> {
     // Start upstream XDS client (for multi-cluster relay)
     // Create a push channel so local wds-add/wds-del can be forwarded upstream
     let upstream_push_tx: Option<UpstreamPushTx> = if let Some(upstream_url) = args.upstream_xds {
-        let (push_tx, push_rx) = mpsc::channel::<WorkloadUpdate>(64);
+        let (push_tx, _push_rx) = mpsc::channel::<WorkloadUpdate>(64);
+        let shared_tx: UpstreamPushTx = Arc::new(tokio::sync::Mutex::new(push_tx));
+        let shared_tx_for_loop = shared_tx.clone();
         let store_for_upstream = workload_store.clone();
         let local_uids: Arc<RwLock<HashSet<String>>> = Arc::new(RwLock::new(HashSet::new()));
         tokio::spawn(async move {
-            // The push_rx can only be consumed once, so we pass it into the first
-            // successful connection. On reconnect we lose buffered pushes, but
-            // the local store is still correct and a full resync would restore state.
-            let mut push_rx_opt = Some(push_rx);
             loop {
                 eprintln!("[Upstream XDS] Connecting to {}...", upstream_url);
-                // Create a dummy receiver if we already consumed the real one
-                let rx = push_rx_opt.take().unwrap_or_else(|| {
-                    let (_tx, rx) = mpsc::channel::<WorkloadUpdate>(1);
-                    rx
-                });
+                // Create a fresh channel for this connection attempt.
+                // The sender is swapped into the shared mutex so control handlers
+                // always have a live channel to push into.
+                let (new_tx, push_rx) = mpsc::channel::<WorkloadUpdate>(64);
+                *shared_tx_for_loop.lock().await = new_tx;
                 match run_upstream_xds_client(
                     upstream_url.clone(),
                     store_for_upstream.clone(),
-                    rx,
+                    push_rx,
                     local_uids.clone(),
                 )
                 .await
@@ -1377,7 +1377,7 @@ async fn main() -> Result<()> {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             }
         });
-        Some(push_tx)
+        Some(shared_tx)
     } else {
         None
     };
@@ -1609,7 +1609,7 @@ async fn handle_control_command(
             workload_store.add(workload.clone()).await;
             // Forward to upstream XDS aggregator if configured
             if let Some(tx) = upstream_tx {
-                if let Err(e) = tx.send(WorkloadUpdate::Add(workload)).await {
+                if let Err(e) = tx.lock().await.send(WorkloadUpdate::Add(workload)).await {
                     eprintln!("[Control] Failed to push wds-add upstream: {}", e);
                 }
             }
@@ -1624,7 +1624,7 @@ async fn handle_control_command(
             // even if the local store didn't have it (echo-back may have
             // already removed the local copy).
             if let Some(tx) = upstream_tx {
-                if let Err(e) = tx.send(WorkloadUpdate::Remove(parts[1].to_string())).await {
+                if let Err(e) = tx.lock().await.send(WorkloadUpdate::Remove(parts[1].to_string())).await {
                     eprintln!("[Control] Failed to push wds-del upstream: {}", e);
                 }
             }
