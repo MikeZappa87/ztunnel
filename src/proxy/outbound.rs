@@ -531,6 +531,44 @@ impl OutboundConnection {
     ) -> Result<Request, Error> {
         let state = &self.pi.state;
 
+        // If the source workload has an outbound routing policy with a waypoint,
+        // force ALL traffic through it (unless the source IS the waypoint, to avoid loops).
+        if source_workload.outbound_routing_policy == crate::state::RoutingPolicy::SrcRouting {
+            if let Some(egress_gw) = source_workload.waypoint.as_ref() {
+                let from_waypoint = proxy::check_from_waypoint(
+                    state,
+                    &source_workload,
+                    Some(&source_workload.identity()),
+                    &downstream,
+                )
+                .await;
+                if !from_waypoint {
+                    let waypoint = state
+                        .fetch_waypoint(egress_gw, &source_workload, target)
+                        .await
+                        .map_err(|e| Error::UnknownWaypoint(format!("egress waypoint: {e}")))?;
+                    let actual_destination =
+                        waypoint
+                            .workload_socket_addr()
+                            .ok_or(Error::NoValidDestination(Box::new(
+                                (*waypoint.workload).clone(),
+                            )))?;
+                    let upstream_sans = waypoint.workload_and_services_san();
+                    debug!("built request to forced egress waypoint");
+                    return Ok(Request {
+                        protocol: OutboundProtocol::HBONE,
+                        source: source_workload,
+                        hbone_target_destination: Some(HboneAddress::SocketAddr(target)),
+                        actual_destination_workload: Some(waypoint.workload),
+                        intended_destination_service: None,
+                        actual_destination,
+                        upstream_sans,
+                        final_sans: vec![],
+                    });
+                }
+            }
+        }
+
         // If this is to-service traffic check for a service waypoint
         // Capture result of whether this is svc addressed
         let service = if let Some(Address::Service(target_service)) = state
@@ -856,11 +894,11 @@ mod tests {
 
         let sock_fact = std::sync::Arc::new(crate::proxy::DefaultSocketFactory::default());
 
-        let wi = WorkloadInfo {
-            name: "source-workload".to_string(),
-            namespace: "ns".to_string(),
-            service_account: "default".to_string(),
-        };
+        let wi = WorkloadInfo::new(
+            "source-workload".to_string(),
+            "ns".to_string(),
+            "default".to_string(),
+        );
         let local_workload_information = Arc::new(LocalWorkloadInformation::new(
             Arc::new(wi.clone()),
             state.clone(),
@@ -1963,11 +2001,11 @@ mod tests {
         let state = new_proxy_state(&[source], &[], &[]);
         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory::default());
 
-        let wi = WorkloadInfo {
-            name: "source-workload".to_string(),
-            namespace: "ns".to_string(),
-            service_account: "default".to_string(),
-        };
+        let wi = WorkloadInfo::new(
+            "source-workload".to_string(),
+            "ns".to_string(),
+            "default".to_string(),
+        );
         let local_workload_information = Arc::new(LocalWorkloadInformation::new(
             Arc::new(wi.clone()),
             state.clone(),
@@ -2041,6 +2079,275 @@ mod tests {
                 .unwrap(),
             "test-network",
             "x-istio-origin-network header should contain the network name for double HBONE inner request"
+        );
+    }
+
+    /// Helper for outbound routing policy tests. Allows customizing the source workload.
+    async fn run_build_request_with_source(
+        from: &str,
+        to: &str,
+        source: XdsWorkload,
+        xds: Vec<XdsAddressType>,
+        expect: Option<ExpectedRequest<'_>>,
+    ) -> Option<Request> {
+        let cfg = Arc::new(Config {
+            local_node: Some("local-node".to_string()),
+            ..crate::config::parse_config().unwrap()
+        });
+        let mut workloads = vec![source.clone()];
+        let mut services = vec![];
+        for x in xds {
+            match x {
+                XdsAddressType::Workload(wl) => workloads.push(wl),
+                XdsAddressType::Service(svc) => services.push(svc),
+            };
+        }
+        let state = new_proxy_state(&workloads, &services, &[]);
+        let sock_fact = std::sync::Arc::new(crate::proxy::DefaultSocketFactory::default());
+
+        let wi = WorkloadInfo::new(
+            source.name.clone(),
+            source.namespace.clone(),
+            source.service_account.clone(),
+        );
+        let local_workload_information = Arc::new(LocalWorkloadInformation::new(
+            Arc::new(wi),
+            state.clone(),
+            identity::mock::new_secret_manager(Duration::from_secs(10)),
+            cfg.clone(),
+        ));
+        let outbound = OutboundConnection {
+            pi: Arc::new(ProxyInputs {
+                state: state.clone(),
+                cfg: cfg.clone(),
+                metrics: test_proxy_metrics(),
+                socket_factory: sock_fact.clone(),
+                local_workload_information: local_workload_information.clone(),
+                connection_manager: ConnectionManager::default(),
+                resolver: None,
+                disable_inbound_freebind: false,
+                crl_manager: None,
+            }),
+            id: TraceParent::new(),
+            pool: WorkloadHBONEPool::new(
+                cfg.clone(),
+                sock_fact,
+                local_workload_information.clone(),
+            ),
+            hbone_port: cfg.inbound_addr.port(),
+        };
+
+        let local = outbound
+            .pi
+            .local_workload_information
+            .get_workload()
+            .await
+            .unwrap();
+        let req = outbound
+            .build_request(local, from.parse().unwrap(), to.parse().unwrap())
+            .await
+            .ok();
+        if let Some(ref r) = req {
+            assert_eq!(
+                expect,
+                Some(ExpectedRequest {
+                    protocol: r.protocol,
+                    hbone_destination: &r
+                        .hbone_target_destination
+                        .as_ref()
+                        .map(|s| s.to_string())
+                        .unwrap_or_default(),
+                    destination: &r.actual_destination.to_string(),
+                })
+            );
+        } else {
+            assert_eq!(expect, None);
+        }
+        req
+    }
+
+    #[tokio::test]
+    async fn build_request_outbound_routing_policy_routes_to_waypoint() {
+        // When source workload has outbound_routing_policy=SrcRouting and a waypoint,
+        // traffic should be routed through the waypoint.
+        let source = XdsWorkload {
+            uid: "cluster1//v1/Pod/ns/source-workload".to_string(),
+            name: "source-workload".to_string(),
+            namespace: "ns".to_string(),
+            addresses: vec![Bytes::copy_from_slice(&[192, 168, 1, 1])],
+            node: "local-node".to_string(),
+            service_account: "default".to_string(),
+            outbound_routing_policy: 1, // OUTBOUND_SRC_ROUTING
+            waypoint: Some(xds::istio::workload::GatewayAddress {
+                destination: Some(
+                    xds::istio::workload::gateway_address::Destination::Address(
+                        XdsNetworkAddress {
+                            network: "".to_string(),
+                            address: vec![10, 0, 0, 50],
+                        },
+                    ),
+                ),
+                hbone_mtls_port: 15008,
+            }),
+            ..Default::default()
+        };
+        let waypoint_wl = XdsWorkload {
+            uid: "cluster1//v1/Pod/istio-system/waypoint-pod".to_string(),
+            name: "waypoint-pod".to_string(),
+            namespace: "istio-system".to_string(),
+            addresses: vec![Bytes::copy_from_slice(&[10, 0, 0, 50])],
+            node: "local-node".to_string(),
+            service_account: "waypoint-sa".to_string(),
+            ..Default::default()
+        };
+
+        run_build_request_with_source(
+            "192.168.1.1",
+            "93.184.216.34:80",
+            source,
+            vec![XdsAddressType::Workload(waypoint_wl)],
+            Some(ExpectedRequest {
+                protocol: OutboundProtocol::HBONE,
+                hbone_destination: "93.184.216.34:80",
+                destination: "10.0.0.50:15008",
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_request_outbound_routing_policy_loop_prevention() {
+        // When the source IS the waypoint (check_from_waypoint returns true),
+        // traffic should NOT be redirected — it goes directly to the destination.
+        let waypoint_as_source = XdsWorkload {
+            uid: "cluster1//v1/Pod/istio-system/waypoint-pod".to_string(),
+            name: "waypoint-pod".to_string(),
+            namespace: "istio-system".to_string(),
+            addresses: vec![Bytes::copy_from_slice(&[10, 0, 0, 50])],
+            node: "local-node".to_string(),
+            service_account: "waypoint-sa".to_string(),
+            outbound_routing_policy: 1, // OUTBOUND_SRC_ROUTING
+            waypoint: Some(xds::istio::workload::GatewayAddress {
+                destination: Some(
+                    xds::istio::workload::gateway_address::Destination::Address(
+                        XdsNetworkAddress {
+                            network: "".to_string(),
+                            address: vec![10, 0, 0, 50], // points to itself
+                        },
+                    ),
+                ),
+                hbone_mtls_port: 15008,
+            }),
+            ..Default::default()
+        };
+
+        // The waypoint's own traffic should go directly (TCP passthrough)
+        run_build_request_with_source(
+            "10.0.0.50",
+            "93.184.216.34:80",
+            waypoint_as_source,
+            vec![],
+            Some(ExpectedRequest {
+                protocol: OutboundProtocol::TCP,
+                hbone_destination: "",
+                destination: "93.184.216.34:80",
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_request_outbound_routing_policy_default_no_redirect() {
+        // When outbound_routing_policy is Default (0), even if waypoint is set,
+        // traffic should NOT be redirected through egress waypoint.
+        let source = XdsWorkload {
+            uid: "cluster1//v1/Pod/ns/source-workload".to_string(),
+            name: "source-workload".to_string(),
+            namespace: "ns".to_string(),
+            addresses: vec![Bytes::copy_from_slice(&[192, 168, 1, 1])],
+            node: "local-node".to_string(),
+            service_account: "default".to_string(),
+            outbound_routing_policy: 0, // OUTBOUND_DEFAULT
+            waypoint: Some(xds::istio::workload::GatewayAddress {
+                destination: Some(
+                    xds::istio::workload::gateway_address::Destination::Address(
+                        XdsNetworkAddress {
+                            network: "".to_string(),
+                            address: vec![10, 0, 0, 50],
+                        },
+                    ),
+                ),
+                hbone_mtls_port: 15008,
+            }),
+            ..Default::default()
+        };
+
+        // Should be TCP passthrough to the unknown destination, NOT routed to waypoint
+        run_build_request_with_source(
+            "192.168.1.1",
+            "93.184.216.34:80",
+            source,
+            vec![],
+            Some(ExpectedRequest {
+                protocol: OutboundProtocol::TCP,
+                hbone_destination: "",
+                destination: "93.184.216.34:80",
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_request_outbound_routing_preserves_original_dest() {
+        // The hbone_target_destination should be the ORIGINAL target, not the waypoint.
+        let source = XdsWorkload {
+            uid: "cluster1//v1/Pod/ns/source-workload".to_string(),
+            name: "source-workload".to_string(),
+            namespace: "ns".to_string(),
+            addresses: vec![Bytes::copy_from_slice(&[192, 168, 1, 1])],
+            node: "local-node".to_string(),
+            service_account: "default".to_string(),
+            outbound_routing_policy: 1, // OUTBOUND_SRC_ROUTING
+            waypoint: Some(xds::istio::workload::GatewayAddress {
+                destination: Some(
+                    xds::istio::workload::gateway_address::Destination::Address(
+                        XdsNetworkAddress {
+                            network: "".to_string(),
+                            address: vec![10, 0, 0, 50],
+                        },
+                    ),
+                ),
+                hbone_mtls_port: 15008,
+            }),
+            ..Default::default()
+        };
+        let waypoint_wl = XdsWorkload {
+            uid: "cluster1//v1/Pod/istio-system/waypoint-pod".to_string(),
+            name: "waypoint-pod".to_string(),
+            namespace: "istio-system".to_string(),
+            addresses: vec![Bytes::copy_from_slice(&[10, 0, 0, 50])],
+            node: "local-node".to_string(),
+            service_account: "waypoint-sa".to_string(),
+            ..Default::default()
+        };
+
+        let req = run_build_request_with_source(
+            "192.168.1.1",
+            "1.2.3.4:443",
+            source,
+            vec![XdsAddressType::Workload(waypoint_wl)],
+            Some(ExpectedRequest {
+                protocol: OutboundProtocol::HBONE,
+                hbone_destination: "1.2.3.4:443",
+                destination: "10.0.0.50:15008",
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            req.hbone_target_destination.unwrap().to_string(),
+            "1.2.3.4:443"
         );
     }
 

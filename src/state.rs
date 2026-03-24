@@ -113,6 +113,24 @@ impl Upstream {
     }
 }
 
+// Routing policy for a workload's outbound traffic.
+#[derive(
+    Debug, Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd, Default, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum RoutingPolicy {
+    #[default]
+    Default,
+    /// Force all outbound traffic through the workload's waypoint.
+    SrcRouting,
+}
+
+impl RoutingPolicy {
+    fn is_default(&self) -> bool {
+        matches!(self, RoutingPolicy::Default)
+    }
+}
+
 // Workload information that a specific proxy instance represents. This is used to cross check
 // with the workload fetched using destination address when making RBAC decisions.
 #[derive(
@@ -924,7 +942,7 @@ impl DemandProxyState {
             })
     }
 
-    async fn fetch_waypoint(
+    pub(crate) async fn fetch_waypoint(
         &self,
         gw_address: &GatewayAddress,
         source_workload: &Workload,
@@ -1182,11 +1200,11 @@ mod tests {
             metrics,
         );
 
-        let want = WorkloadInfo {
-            name: delayed_wl.name.to_string(),
-            namespace: delayed_wl.namespace.to_string(),
-            service_account: delayed_wl.service_account.to_string(),
-        };
+        let want = WorkloadInfo::new(
+            delayed_wl.name.to_string(),
+            delayed_wl.namespace.to_string(),
+            delayed_wl.service_account.to_string(),
+        );
 
         test_helpers::assert_eventually(
             Duration::from_secs(1),
@@ -1210,11 +1228,11 @@ mod tests {
             metrics,
         );
 
-        let want = WorkloadInfo {
-            name: "fake".to_string(),
-            namespace: "fake".to_string(),
-            service_account: "fake".to_string(),
-        };
+        let want = WorkloadInfo::new(
+            "fake".to_string(),
+            "fake".to_string(),
+            "fake".to_string(),
+        );
 
         test_helpers::assert_eventually(
             Duration::from_millis(10),
@@ -1249,11 +1267,11 @@ mod tests {
         );
 
         // Some from Address
-        let want = WorkloadInfo {
-            name: delayed_wl.name.to_string(),
-            namespace: delayed_wl.namespace.to_string(),
-            service_account: delayed_wl.service_account.to_string(),
-        };
+        let want = WorkloadInfo::new(
+            delayed_wl.name.to_string(),
+            delayed_wl.namespace.to_string(),
+            delayed_wl.service_account.to_string(),
+        );
 
         let expected_wl = delayed_wl.clone();
         let t = tokio::spawn(async move {

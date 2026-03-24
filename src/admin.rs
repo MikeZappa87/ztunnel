@@ -676,6 +676,7 @@ mod tests {
             }),
             extensions: Default::default(),
             capacity: Default::default(),
+            outbound_routing_policy: Default::default(),
             // ..Default::default() // intentionally don't default. we want all fields populated
         };
 

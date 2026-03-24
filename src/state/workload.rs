@@ -284,6 +284,11 @@ pub struct Workload {
 
     #[serde(default = "default_capacity")]
     pub capacity: u32,
+
+    /// Outbound routing policy for this workload.
+    /// When set to SrcRouting, all outbound traffic is forced through the waypoint.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub outbound_routing_policy: crate::state::RoutingPolicy,
 }
 
 fn default_capacity() -> u32 {
@@ -524,6 +529,13 @@ impl TryFrom<XdsWorkload> for (Workload, HashMap<String, PortList>) {
 
             capacity: resource.capacity.unwrap_or(1),
             services,
+            outbound_routing_policy: {
+                use xds::istio::workload::OutboundRoutingPolicy;
+                match OutboundRoutingPolicy::try_from(resource.outbound_routing_policy) {
+                    Ok(OutboundRoutingPolicy::OutboundSrcRouting) => crate::state::RoutingPolicy::SrcRouting,
+                    _ => crate::state::RoutingPolicy::Default,
+                }
+            },
         };
         // Return back part we did not use (service) so it can be consumed without cloning
         Ok((wl, resource.services))

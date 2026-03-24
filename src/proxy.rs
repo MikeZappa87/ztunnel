@@ -203,13 +203,18 @@ impl LocalWorkloadInformation {
     pub async fn fetch_certificate(
         &self,
     ) -> Result<Arc<tls::WorkloadCertificate>, identity::Error> {
-        // We don't know the trust domain until we get the workload from XDS, so fetch that
-        let wl = self
-            .get_workload()
-            .await
-            .map_err(|_| identity::Error::UnknownWorkload(self.workload_info()))?;
+        let (trust_domain, uid, wl_identity) = match self.get_workload().await {
+            Ok(wl) => (
+                wl.trust_domain.clone(),
+                wl.uid.to_string(),
+                wl.identity(),
+            ),
+            Err(_) => {
+                return Err(identity::Error::UnknownWorkload(self.workload_info()));
+            }
+        };
         let id = &Identity::Spiffe {
-            trust_domain: wl.trust_domain.clone(),
+            trust_domain,
             namespace: (&self.wi.namespace).into(),
             service_account: (&self.wi.service_account).into(),
         };
@@ -217,10 +222,10 @@ impl LocalWorkloadInformation {
         let key = if self.cfg.spire_enabled {
             CompositeId::new(
                 id.clone(),
-                RequestKey::Workload(WorkloadUid::new(wl.uid.to_string())),
+                RequestKey::Workload(WorkloadUid::new(uid)),
             )
         } else {
-            CompositeId::new(id.clone(), RequestKey::Identity(wl.identity().clone()))
+            CompositeId::new(id.clone(), RequestKey::Identity(wl_identity))
         };
 
         self.full_cert_manager.fetch_certificate(&key).await

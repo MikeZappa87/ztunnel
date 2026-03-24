@@ -280,8 +280,23 @@ message Workload {
   // If unset, the capacity is default to 1.
   google.protobuf.UInt32Value capacity = 27;
 
+  // Outbound routing policy for this workload.
+  // When set to SRC_ROUTING, all outbound traffic from this workload is forced
+  // through the waypoint specified in the `waypoint` field.
+  OutboundRoutingPolicy outbound_routing_policy = 28;
+
   // Reservations for deleted fields.
   reserved 15;
+}
+
+// OutboundRoutingPolicy controls how a workload's outbound traffic is routed.
+enum OutboundRoutingPolicy {
+  // OUTBOUND_DEFAULT uses standard outbound path — traffic goes directly to the destination.
+  // The `waypoint` field on Workload is only used for inbound routing in this mode.
+  OUTBOUND_DEFAULT = 0;
+  // OUTBOUND_SRC_ROUTING forces all outbound traffic through the waypoint specified
+  // in the Workload's `waypoint` field.
+  OUTBOUND_SRC_ROUTING = 1;
 }
 
 message Locality {

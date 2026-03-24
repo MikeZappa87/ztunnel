@@ -234,6 +234,7 @@ pub fn test_default_workload() -> Workload {
         application_tunnel: None,
         locality: Default::default(),
         services: Default::default(),
+        outbound_routing_policy: Default::default(),
     }
 }
 
