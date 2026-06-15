@@ -1,82 +1,56 @@
-# Source: ztunnel/templates/daemonset.yaml
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
+  labels:
+    app.kubernetes.io/instance: ztunnel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: ztunnel-windows
+    app.kubernetes.io/part-of: istio
+    app.kubernetes.io/version: 1.0.0
+    helm.sh/chart: ztunnel-windows-1.0.0
   name: ztunnel-windows
   namespace: istio-system
-  labels:
-    app.kubernetes.io/name: ztunnel-windows
-    app.kubernetes.io/managed-by: "Helm"
-    app.kubernetes.io/instance: "ztunnel"
-    app.kubernetes.io/part-of: "istio"
-    app.kubernetes.io/version: "1.0.0"
-    helm.sh/chart: ztunnel-windows-1.0.0
-  annotations:
 spec:
-  updateStrategy:
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+  revisionHistoryLimit: 10
   selector:
     matchLabels:
       app: ztunnel-windows
   template:
     metadata:
-      labels:
-        sidecar.istio.io/inject: "false"
-        istio.io/dataplane-mode: none
-        app: ztunnel-windows
-        app.kubernetes.io/name: ztunnel-windows
-        app.kubernetes.io/managed-by: "Helm"
-        app.kubernetes.io/instance: "ztunnel-windows"
-        app.kubernetes.io/part-of: "istio"
-        app.kubernetes.io/version: "1.0.0"
-        helm.sh/chart: ztunnel-windows-1.0.0
       annotations:
-        sidecar.istio.io/inject: "false"
         prometheus.io/port: "15020"
         prometheus.io/scrape: "true"
+        sidecar.istio.io/inject: "false"
+      labels:
+        app: ztunnel-windows
+        app.kubernetes.io/instance: ztunnel-windows
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/name: ztunnel-windows
+        app.kubernetes.io/part-of: istio
+        app.kubernetes.io/version: 1.0.0
+        helm.sh/chart: ztunnel-windows-1.0.0
+        istio.io/dataplane-mode: none
+        sidecar.istio.io/inject: "false"
     spec:
-      nodeSelector:
-        kubernetes.io/os: windows
-      serviceAccountName: ztunnel
-      hostNetwork: true
-      tolerations:
-        - effect: NoSchedule
-          operator: Exists
-        - key: CriticalAddonsOnly
-          operator: Exists
-        - effect: NoExecute
-          operator: Exists
       containers:
-      - name: istio-proxy
-        image: "istiolocaltesting.azurecr.io/ztunnel-windows:20250322-9"
-        resources:
-          requests:
-            cpu: 200m
-            memory: 512Mi
-        securityContext:
-          windowsOptions:
-            hostProcess: true
-            runAsUserName: "NT AUTHORITY\\SYSTEM"
-        readinessProbe:
-          httpGet:
-            port: 15021
-            path: /healthz/ready
-        args:
+      - args:
         - proxy
         - ztunnel
         env:
+        - name: ISTIOD_SERVICE_HOST
+          value: 10.0.127.250 #clusterIP for istiod
+        - name: XDS_ADDRESS
+          value: https://10.0.127.250:15012
+        - name: CA_ADDRESS
+          value: https://10.0.127.250:15012
         - name: ALT_XDS_HOSTNAME
-          value: "istiod-1-25-0.istio-system.svc"
+          value: istiod.istio-system.svc
         - name: ALT_CA_HOSTNAME
-          value: "istiod-1-25-0.istio-system.svc"
+          value: istiod.istio-system.svc
         - name: USE_ENV_FOR_DEFAULT_ISTIOD_ADDR
           value: "true"
-        - name: REVISION
-          value: "1-25-0"
         - name: RUST_LOG
-          value: "trace"
+          value: trace
         - name: RUST_BACKTRACE
           value: "1"
         - name: ISTIO_META_CLUSTER_ID
@@ -94,23 +68,50 @@ spec:
         - name: POD_NAME
           valueFrom:
             fieldRef:
+              apiVersion: v1
               fieldPath: metadata.name
         - name: POD_NAMESPACE
           valueFrom:
             fieldRef:
+              apiVersion: v1
               fieldPath: metadata.namespace
         - name: NODE_NAME
           valueFrom:
             fieldRef:
+              apiVersion: v1
               fieldPath: spec.nodeName
         - name: INSTANCE_IP
           valueFrom:
             fieldRef:
+              apiVersion: v1
               fieldPath: status.podIP
         - name: SERVICE_ACCOUNT
           valueFrom:
             fieldRef:
+              apiVersion: v1
               fieldPath: spec.serviceAccountName
+        image: acndev.azurecr.io/agentfabric/ztunnel-windows
+        imagePullPolicy: IfNotPresent
+        name: istio-proxy
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /healthz/ready
+            port: 15021
+            scheme: HTTP
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+        resources:
+          requests:
+            cpu: 200m
+            memory: 512Mi
+        securityContext:
+          windowsOptions:
+            hostProcess: true
+            runAsUserName: NT AUTHORITY\SYSTEM
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
         volumeMounts:
         - mountPath: /var/run/secrets/istio
           name: istiod-ca-cert
@@ -120,23 +121,45 @@ spec:
           name: cni-ztunnel-sock-dir
         - mountPath: /tmp
           name: tmp
+      dnsPolicy: ClusterFirst
+      hostNetwork: true
+      nodeSelector:
+        kubernetes.io/os: windows
       priorityClassName: system-node-critical
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      serviceAccount: ztunnel
+      serviceAccountName: ztunnel
       terminationGracePeriodSeconds: 30
+      tolerations:
+      - effect: NoSchedule
+        operator: Exists
+      - key: CriticalAddonsOnly
+        operator: Exists
+      - effect: NoExecute
+        operator: Exists
       volumes:
       - name: istio-token
         projected:
+          defaultMode: 420
           sources:
           - serviceAccountToken:
-              path: istio-token
-              expirationSeconds: 43200
               audience: istio-ca
-      - name: istiod-ca-cert
-        configMap:
+              expirationSeconds: 43200
+              path: istio-token
+      - configMap:
+          defaultMode: 420
           name: istio-ca-root-cert
-      - name: cni-ztunnel-sock-dir
-        hostPath:
+        name: istiod-ca-cert
+      - hostPath:
           path: /var/run/ztunnel
-          type: DirectoryOrCreate # ideally this would be a socket, but ztunnel may not have started yet.
-      # pprof needs a writable /tmp, and we don't have that thanks to `readOnlyRootFilesystem: true`, so mount one
-      - name: tmp
-        emptyDir: {}
+          type: DirectoryOrCreate
+        name: cni-ztunnel-sock-dir
+      - emptyDir: {}
+        name: tmp
+  updateStrategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
